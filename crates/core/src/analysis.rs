@@ -1,4 +1,4 @@
-//! Availability and conflict analysis of bounded scheduler query results.
+//! Availability and conflict analysis of bounded schedule store query results.
 
 use crate::{DateRange, DateTime, Duration, Error, QueryWindow, ScheduledOccurrence, Utc};
 
@@ -213,12 +213,12 @@ impl<ItemId> Clone for Overlap<'_, ItemId> {
 }
 
 impl<'a, ItemId> Overlap<'a, ItemId> {
-    /// Returns the earlier occurrence in scheduler query order.
+    /// Returns the earlier occurrence in schedule store query order.
     pub const fn first(&self) -> ScheduledOccurrence<'a, ItemId> {
         self.first
     }
 
-    /// Returns the later occurrence in scheduler query order.
+    /// Returns the later occurrence in schedule store query order.
     pub const fn second(&self) -> ScheduledOccurrence<'a, ItemId> {
         self.second
     }

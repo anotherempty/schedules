@@ -3,7 +3,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use schedules_core::{
     CalendarRule, DateRange, DateTime, Duration, Error, Frequency, NaiveDateTime, NaiveTime,
     OccurrenceKey, OccurrenceOverride, Placement, QueryWindow, Recurrence, ResolutionPolicy,
-    Schedule, Scheduler, Termination, Tz, Utc, Weekday,
+    Schedule, ScheduleStore, Termination, Tz, Utc, Weekday,
 };
 
 const WORK_BUDGET: usize = 5_000;
@@ -232,11 +232,11 @@ fn elapsed_filter_uses_local_weekday_and_preserves_cadence_count_and_successors(
     ]
     .map(Fixture::utc);
     assert_eq!(Fixture::starts(&schedule, window), expected);
-    let mut scheduler = Scheduler::new();
-    scheduler.insert(Weekday::Fri.num_days_from_monday(), schedule);
+    let mut schedule_store = ScheduleStore::new();
+    schedule_store.insert(Weekday::Fri.num_days_from_monday(), schedule);
     let item = Weekday::Fri.num_days_from_monday();
     for (anchor, next) in expected.iter().zip(expected.iter().skip(1)) {
-        let actual = scheduler
+        let actual = schedule_store
             .next_after(
                 &item,
                 OccurrenceKey::Elapsed(*anchor),
@@ -248,7 +248,7 @@ fn elapsed_filter_uses_local_weekday_and_preserves_cadence_count_and_successors(
         assert_eq!(actual.occurrence.key(), OccurrenceKey::Elapsed(*next));
     }
     assert!(
-        scheduler
+        schedule_store
             .next_after(
                 &item,
                 OccurrenceKey::Elapsed(*expected.last().unwrap()),
@@ -259,7 +259,7 @@ fn elapsed_filter_uses_local_weekday_and_preserves_cadence_count_and_successors(
             .is_none()
     );
     assert_eq!(
-        scheduler.next_after(
+        schedule_store.next_after(
             &item,
             OccurrenceKey::Elapsed(Fixture::utc("2026-01-03 03:00:00")),
             Tz::UTC,
@@ -442,9 +442,9 @@ fn successor_seeking_matches_expansion_for_filtered_calendar_and_elapsed_rules()
     }
     for recurrence in recurrences {
         let schedule = Schedule::repeating(anchor, recurrence).unwrap();
-        let mut scheduler = Scheduler::new();
-        scheduler.insert((), schedule);
-        let results = scheduler
+        let mut schedule_store = ScheduleStore::new();
+        schedule_store.insert((), schedule);
+        let results = schedule_store
             .occurrences(Fixture::window(
                 "2026-01-02 00:00:00",
                 "2026-02-01 00:00:00",
@@ -453,7 +453,7 @@ fn successor_seeking_matches_expansion_for_filtered_calendar_and_elapsed_rules()
         assert!(!results.is_empty());
         for (current, expected) in results.iter().zip(results.iter().skip(1)) {
             assert_eq!(
-                scheduler
+                schedule_store
                     .next_after(&(), current.occurrence.key(), Tz::UTC, Fixture::budget())
                     .unwrap(),
                 Some(*expected)

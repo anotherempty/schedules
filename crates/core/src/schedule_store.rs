@@ -10,11 +10,11 @@ use crate::{Error, Occurrence, OccurrenceKey, QueryWindow, Schedule, ScheduleAna
 
 /// In-memory schedules keyed by application-owned item identifiers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Scheduler<ItemId> {
+pub struct ScheduleStore<ItemId> {
     schedules: BTreeMap<ItemId, Schedule>,
 }
 
-impl<ItemId> Default for Scheduler<ItemId> {
+impl<ItemId> Default for ScheduleStore<ItemId> {
     fn default() -> Self {
         Self {
             schedules: BTreeMap::new(),
@@ -22,8 +22,8 @@ impl<ItemId> Default for Scheduler<ItemId> {
     }
 }
 
-impl<ItemId: Ord> Scheduler<ItemId> {
-    /// Creates an empty scheduler keyed by ordered application identifiers.
+impl<ItemId: Ord> ScheduleStore<ItemId> {
+    /// Creates an empty schedule store keyed by ordered application identifiers.
     pub fn new() -> Self {
         Self::default()
     }
@@ -76,7 +76,7 @@ impl<ItemId: Ord> Scheduler<ItemId> {
     ///
     /// ```
     /// use std::num::NonZeroUsize;
-    /// use schedules_core::{DateRange, DateTime, Duration, Error, QueryWindow, Scheduler, Tz};
+    /// use schedules_core::{DateRange, DateTime, Duration, Error, QueryWindow, ScheduleStore, Tz};
     /// const WINDOW_LENGTH: Duration = Duration::hours(8);
     /// let start = DateTime::UNIX_EPOCH;
     /// let end = start.checked_add_signed(WINDOW_LENGTH).ok_or(Error::OutOfRange)?;
@@ -86,8 +86,8 @@ impl<ItemId: Ord> Scheduler<ItemId> {
     ///     candidate_limit: NonZeroUsize::MIN,
     ///     occurrence_limit: NonZeroUsize::MIN,
     /// };
-    /// let scheduler: Scheduler<u64> = Scheduler::new();
-    /// let analysis = scheduler.analyze(window)?;
+    /// let schedule_store: ScheduleStore<u64> = ScheduleStore::new();
+    /// let analysis = schedule_store.analyze(window)?;
     /// assert_eq!(analysis.longest_gap(), Some(window.range));
     /// assert!(analysis.is_slot_available(window.range));
     /// # Ok::<(), Error>(())
@@ -120,7 +120,7 @@ impl<ItemId: Ord> Scheduler<ItemId> {
     /// ```
     /// use std::num::NonZeroUsize;
     /// use schedules_core::{DateTime, Duration, Error, OccurrenceKey, Placement, Recurrence,
-    ///     Schedule, Scheduler, Termination, Tz};
+    ///     Schedule, ScheduleStore, Termination, Tz};
     /// #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
     /// enum ItemId { Poll }
     /// const POLL_INTERVAL: Duration = Duration::hours(1);
@@ -130,9 +130,9 @@ impl<ItemId: Ord> Scheduler<ItemId> {
     ///     Placement::instant(start, Tz::UTC)?,
     ///     Recurrence::elapsed(POLL_INTERVAL, Termination::Forever)?,
     /// )?;
-    /// let mut scheduler = Scheduler::new();
-    /// scheduler.insert(ItemId::Poll, schedule);
-    /// let next = scheduler.next_after(
+    /// let mut schedule_store = ScheduleStore::new();
+    /// schedule_store.insert(ItemId::Poll, schedule);
+    /// let next = schedule_store.next_after(
     ///     &ItemId::Poll, OccurrenceKey::Elapsed(start), Tz::UTC,
     ///     NonZeroUsize::new(SEARCH_WORK_UNITS).ok_or(Error::OutOfRange)?,
     /// )?;
@@ -186,7 +186,7 @@ impl<ItemId: Ord> Scheduler<ItemId> {
     ///
     /// Budgets apply across the whole query. Inspecting each schedule costs one
     /// candidate unit in addition to the work described by [`Schedule::iter`].
-    /// Returned item IDs borrow from this scheduler. Errors discard partial results.
+    /// Returned item IDs borrow from this schedule store. Errors discard partial results.
     ///
     /// # Examples
     ///
@@ -203,17 +203,17 @@ impl<ItemId: Ord> Scheduler<ItemId> {
     ///     candidate_limit: NonZeroUsize::MIN,
     ///     occurrence_limit: NonZeroUsize::MIN,
     /// };
-    /// use schedules_core::Scheduler;
+    /// use schedules_core::ScheduleStore;
     /// #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
     /// enum ItemId { Meeting }
     /// const QUERY_WORK_UNITS: usize = 2; // One schedule inspection and one candidate.
-    /// let mut scheduler = Scheduler::new();
-    /// scheduler.insert(ItemId::Meeting, schedule);
+    /// let mut schedule_store = ScheduleStore::new();
+    /// schedule_store.insert(ItemId::Meeting, schedule);
     /// let window = QueryWindow {
     ///     candidate_limit: NonZeroUsize::new(QUERY_WORK_UNITS).ok_or(Error::OutOfRange)?,
     ///     ..window
     /// };
-    /// let results = scheduler.occurrences(window)?;
+    /// let results = schedule_store.occurrences(window)?;
     /// assert_eq!(results.first().map(|entry| entry.item_id), Some(&ItemId::Meeting));
     /// # Ok::<(), Error>(())
     /// ```

@@ -3,19 +3,19 @@
 Rust library for calendar-aware placement and recurrence. Workspace library:
 `crates/core` (`schedules-core`). No runtime or persistence required.
 
-`Scheduler<ItemId>` owns an in-memory map of item IDs to schedules. `insert` adds
+`ScheduleStore<ItemId>` owns an in-memory map of item IDs to schedules. `insert` adds
 or replaces a complete schedule and returns the previous value. `get`, `get_mut`,
 `remove`, and `iter` provide access without cloning IDs or schedules. Application
 continues to own item payloads and persistence.
 
-`Scheduler::occurrences` queries all items and returns `ScheduledOccurrence` values
+`ScheduleStore::occurrences` queries all items and returns `ScheduledOccurrence` values
 pairing borrowed item IDs with occurrences. Results sort by UTC start, item ID,
 then occurrence key. Identity across items is `(item ID, occurrence key)`.
 Work and result budgets apply across the entire query. Inspecting a schedule costs
 one additional work unit, including schedules without matching occurrences.
 Any expansion failure returns an error and discards partial results.
 
-`Scheduler::next_after(&item_id, occurrence_key, all_day_zone, candidate_limit)`
+`ScheduleStore::next_after(&item_id, occurrence_key, all_day_zone, candidate_limit)`
 searches directly for one successor, without a date window or result limit.
 Ordering matches `occurrences`, including ties and repeated occurrences of the
 same item. Overrides determine actual placement. Missing or cancelled anchors
@@ -42,7 +42,7 @@ because skipped dates, timezone gaps, and excluded weekdays do not count as occu
 
 ## Availability and conflicts
 
-`Scheduler::analyze(window)` expands occurrences once and returns a
+`ScheduleStore::analyze(window)` expands occurrences once and returns a
 `ScheduleAnalysis` borrowing item identifiers. Query work and occurrence budgets
 retain their existing scope; any expansion error discards the analysis.
 
@@ -156,10 +156,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 ## Benchmark
 
 ```sh
-cargo bench -p schedules-core --bench scheduler
+cargo bench -p schedules-core --bench schedule_store
 ```
 
-Criterion measures complete sorted scheduler queries with 10, 100, and 1,000 items.
+Criterion measures complete sorted schedule store queries with 10, 100, and 1,000 items.
 Each item repeats on four weekdays at three local times across London, New York,
 and Nairobi timezones. Two-week query crosses London's spring DST transition and
 returns 24 occurrences per item. Recent and year-old anchors expose expansion's
@@ -167,25 +167,25 @@ history-scanning cost. Setup and successful result-count verification occur outs
 timed iterations; query expansion, timezone resolution, allocation, sorting, and
 result destruction are measured. Criterion stores reports under `target/criterion`.
 
-`scheduler_next_after` measures one-successor searches using the same item counts,
+`schedule_store_next_after` measures one-successor searches using the same item counts,
 timezones, and recent/year-old schedules. Anchor occurrence stays in March 2026,
 so year-old cases verify that seeking avoids historical expansion. Setup validates the successor
 against sorted query results outside timed iterations. Throughput counts one
 successor per query. Run only this group with:
 
 ```sh
-cargo bench -p schedules-core --bench scheduler -- scheduler_next_after
+cargo bench -p schedules-core --bench schedule_store -- schedule_store_next_after
 ```
 
 Analysis benchmarks use one-hour timed events with the same item counts,
 recurrence rules, timezones, and DST-crossing window:
 
-1. `scheduler_analysis` measures expansion, sorting, analysis construction, and
+1. `schedule_store_analysis` measures expansion, sorting, analysis construction, and
    result destruction for recent and year-old anchors.
-2. `scheduler_analysis_overlaps` consumes every conflict pair from a precomputed
+2. `schedule_store_analysis_overlaps` consumes every conflict pair from a precomputed
    analysis; throughput counts pairs. Dense same-zone events expose quadratic
    output growth without allocating a conflict list.
-3. `scheduler_analysis_alternatives` generates and drops ranked one-hour
+3. `schedule_store_analysis_alternatives` generates and drops ranked one-hour
    appointments from a precomputed analysis. Gap count remains fixed as item
    count grows, isolating suggestion cost from occurrence expansion.
 
@@ -194,5 +194,5 @@ calculated conflict counts, and suggested appointment validity outside timing.
 Run all analysis groups with:
 
 ```sh
-cargo bench -p schedules-core --bench scheduler -- scheduler_analysis
+cargo bench -p schedules-core --bench schedule_store -- schedule_store_analysis
 ```

@@ -7,8 +7,8 @@ use std::{
 use criterion::{BenchmarkId, Criterion, Throughput};
 use schedules_core::{
     CalendarRule, DateRange, DateTime, Error, Frequency, NaiveDateTime, NaiveTime, OccurrenceKey,
-    Placement, QueryWindow, Recurrence, ResolutionPolicy, Schedule, Scheduler, Termination, Utc,
-    Weekday,
+    Placement, QueryWindow, Recurrence, ResolutionPolicy, Schedule, ScheduleStore, Termination,
+    Utc, Weekday,
 };
 
 const ITEM_COUNTS: [usize; 3] = [10, 100, 1_000];
@@ -69,7 +69,7 @@ enum BenchError {
 }
 
 struct Fixture {
-    scheduler: Scheduler<usize>,
+    schedule_store: ScheduleStore<usize>,
     window: QueryWindow,
     expected_count: usize,
 }
@@ -97,7 +97,7 @@ impl Fixture {
             chrono_tz::America::New_York,
             chrono_tz::Africa::Nairobi,
         ];
-        let mut scheduler = Scheduler::new();
+        let mut schedule_store = ScheduleStore::new();
         for (item_id, zone) in zones.into_iter().cycle().take(item_count).enumerate() {
             let placement = match duration {
                 Some(duration) => {
@@ -105,7 +105,7 @@ impl Fixture {
                 }
                 None => Placement::point(local, zone, ResolutionPolicy::default())?,
             };
-            scheduler.insert(
+            schedule_store.insert(
                 item_id,
                 Schedule::repeating(placement, Recurrence::calendar(rule.clone()))?,
             );
@@ -126,11 +126,11 @@ impl Fixture {
             occurrence_limit: NonZeroUsize::new(expected_count).ok_or(BenchError::InvalidSize)?,
         };
         let fixture = Self {
-            scheduler,
+            schedule_store,
             window,
             expected_count,
         };
-        let actual = fixture.scheduler.occurrences(fixture.window)?.len();
+        let actual = fixture.schedule_store.occurrences(fixture.window)?.len();
         if actual != expected_count {
             return Err(BenchError::UnexpectedCount {
                 expected: expected_count,
@@ -141,7 +141,7 @@ impl Fixture {
     }
 
     fn register(criterion: &mut Criterion) -> Result<(), BenchError> {
-        let mut group = criterion.benchmark_group("scheduler_query");
+        let mut group = criterion.benchmark_group("schedule_store_query");
         group.sample_size(SAMPLE_COUNT);
         group.warm_up_time(Duration::from_secs(WARMUP_SECONDS));
         group.measurement_time(Duration::from_secs(MEASUREMENT_SECONDS));
@@ -153,7 +153,11 @@ impl Fixture {
                 group.throughput(Throughput::Elements(throughput));
                 group.bench_function(BenchmarkId::new(scenario, item_count), |bench| {
                     bench.iter(|| {
-                        black_box(fixture.scheduler.occurrences(black_box(fixture.window)))
+                        black_box(
+                            fixture
+                                .schedule_store
+                                .occurrences(black_box(fixture.window)),
+                        )
                     });
                 });
             }
@@ -174,13 +178,13 @@ impl NextFixture {
         // Always query in 2026, including when recurrence began a year earlier.
         let key =
             OccurrenceKey::Calendar(NaiveDateTime::parse_from_str(RECENT_ANCHOR, LOCAL_FORMAT)?);
-        let results = fixture.scheduler.occurrences(fixture.window)?;
+        let results = fixture.schedule_store.occurrences(fixture.window)?;
         let mut reference = results.into_iter();
         reference
             .find(|entry| *entry.item_id == NEXT_ANCHOR_ITEM && entry.occurrence.key() == key)
             .ok_or(BenchError::MissingReference)?;
         let expected = reference.next().ok_or(BenchError::MissingReference)?;
-        let actual = fixture.scheduler.next_after(
+        let actual = fixture.schedule_store.next_after(
             &NEXT_ANCHOR_ITEM,
             key,
             fixture.window.all_day_zone,
@@ -196,7 +200,7 @@ impl NextFixture {
     }
 
     fn register(criterion: &mut Criterion) -> Result<(), BenchError> {
-        let mut group = criterion.benchmark_group("scheduler_next_after");
+        let mut group = criterion.benchmark_group("schedule_store_next_after");
         group.sample_size(SAMPLE_COUNT);
         group.warm_up_time(Duration::from_secs(WARMUP_SECONDS));
         group.measurement_time(Duration::from_secs(MEASUREMENT_SECONDS));
@@ -206,7 +210,7 @@ impl NextFixture {
                 let fixture = Self::new(item_count, anchor)?;
                 group.bench_function(BenchmarkId::new(scenario, item_count), |bench| {
                     bench.iter(|| {
-                        black_box(fixture.fixture.scheduler.next_after(
+                        black_box(fixture.fixture.schedule_store.next_after(
                             black_box(&NEXT_ANCHOR_ITEM),
                             black_box(fixture.key),
                             black_box(fixture.fixture.window.all_day_zone),
@@ -261,7 +265,7 @@ impl AnalysisFixture {
                 .checked_add(pairs)
                 .ok_or(BenchError::InvalidSize)?;
         }
-        let analysis = fixture.scheduler.analyze(fixture.window)?;
+        let analysis = fixture.schedule_store.analyze(fixture.window)?;
         let actual = analysis.density().occupied();
         if actual != EXPECTED_OCCUPIED_DURATION {
             return Err(BenchError::UnexpectedOccupancy {
@@ -300,7 +304,7 @@ impl AnalysisFixture {
     }
 
     fn register(criterion: &mut Criterion) -> Result<(), BenchError> {
-        let mut group = criterion.benchmark_group("scheduler_analysis");
+        let mut group = criterion.benchmark_group("schedule_store_analysis");
         group.sample_size(SAMPLE_COUNT);
         group.warm_up_time(Duration::from_secs(WARMUP_SECONDS));
         group.measurement_time(Duration::from_secs(MEASUREMENT_SECONDS));
@@ -315,7 +319,7 @@ impl AnalysisFixture {
                         black_box(
                             fixture
                                 .fixture
-                                .scheduler
+                                .schedule_store
                                 .analyze(black_box(fixture.fixture.window)),
                         )
                     });
@@ -324,13 +328,16 @@ impl AnalysisFixture {
         }
         group.finish();
 
-        let mut group = criterion.benchmark_group("scheduler_analysis_overlaps");
+        let mut group = criterion.benchmark_group("schedule_store_analysis_overlaps");
         group.sample_size(SAMPLE_COUNT);
         group.warm_up_time(Duration::from_secs(WARMUP_SECONDS));
         group.measurement_time(Duration::from_secs(MEASUREMENT_SECONDS));
         for item_count in ITEM_COUNTS {
             let fixture = Self::new(item_count, RECENT_ANCHOR)?;
-            let analysis = fixture.fixture.scheduler.analyze(fixture.fixture.window)?;
+            let analysis = fixture
+                .fixture
+                .schedule_store
+                .analyze(fixture.fixture.window)?;
             let throughput =
                 u64::try_from(fixture.expected_conflicts).map_err(|_| BenchError::InvalidSize)?;
             group.throughput(Throughput::Elements(throughput));
@@ -345,13 +352,16 @@ impl AnalysisFixture {
         }
         group.finish();
 
-        let mut group = criterion.benchmark_group("scheduler_analysis_alternatives");
+        let mut group = criterion.benchmark_group("schedule_store_analysis_alternatives");
         group.sample_size(SAMPLE_COUNT);
         group.warm_up_time(Duration::from_secs(WARMUP_SECONDS));
         group.measurement_time(Duration::from_secs(MEASUREMENT_SECONDS));
         for item_count in ITEM_COUNTS {
             let fixture = Self::new(item_count, RECENT_ANCHOR)?;
-            let analysis = fixture.fixture.scheduler.analyze(fixture.fixture.window)?;
+            let analysis = fixture
+                .fixture
+                .schedule_store
+                .analyze(fixture.fixture.window)?;
             group.bench_function(BenchmarkId::from_parameter(item_count), |bench| {
                 bench.iter(|| {
                     black_box(black_box(&analysis).suggest_alternatives(

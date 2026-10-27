@@ -12,5 +12,5 @@ thiserror.workspace = true
 criterion.workspace = true
 
 [[bench]]
-name = "scheduler"
+name = "schedule_store"
 harness = false

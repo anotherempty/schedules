@@ -17,7 +17,7 @@ const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
 
 /// A placement with optional recurrence and validated per-occurrence overrides.
 ///
-/// Application identity and payload belong to the caller; [`crate::Scheduler`]
+/// Application identity and payload belong to the caller; [`crate::ScheduleStore`]
 /// can associate schedules with application-owned identifiers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schedule {

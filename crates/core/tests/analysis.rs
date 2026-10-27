@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 
 use schedules_core::{
     DateRange, DateTime, Duration, Error, NaiveDate, OccurrenceKey, OccurrenceOverride, Placement,
-    QueryWindow, Recurrence, ResolutionPolicy, Schedule, Scheduler, Termination, Tz, Utc,
+    QueryWindow, Recurrence, ResolutionPolicy, Schedule, ScheduleStore, Termination, Tz, Utc,
 };
 
 const WORK_BUDGET: usize = 100;
@@ -59,39 +59,39 @@ impl Fixture {
         .unwrap()
     }
 
-    fn insert(scheduler: &mut Scheduler<Item>, item: Item, start: &str, end: &str) {
-        scheduler.insert(item, Schedule::once(Self::placement(start, end)));
+    fn insert(schedule_store: &mut ScheduleStore<Item>, item: Item, start: &str, end: &str) {
+        schedule_store.insert(item, Schedule::once(Self::placement(start, end)));
     }
 }
 
 #[test]
 fn union_clips_nested_and_touching_intervals_without_double_counting() {
-    let mut scheduler = Scheduler::new();
+    let mut schedule_store = ScheduleStore::new();
     Fixture::insert(
-        &mut scheduler,
+        &mut schedule_store,
         Item::Early,
         "2026-01-01T08:00:00Z",
         "2026-01-01T12:00:00Z",
     );
     Fixture::insert(
-        &mut scheduler,
+        &mut schedule_store,
         Item::Nested,
         "2026-01-01T10:00:00Z",
         "2026-01-01T11:00:00Z",
     );
     Fixture::insert(
-        &mut scheduler,
+        &mut schedule_store,
         Item::Crossing,
         "2026-01-01T12:00:00Z",
         "2026-01-01T13:00:00Z",
     );
     Fixture::insert(
-        &mut scheduler,
+        &mut schedule_store,
         Item::Late,
         "2026-01-01T16:00:00Z",
         "2026-01-01T18:00:00Z",
     );
-    let analysis = scheduler.analyze(Fixture::window()).unwrap();
+    let analysis = schedule_store.analyze(Fixture::window()).unwrap();
     assert_eq!(
         analysis.gaps(),
         &[Fixture::range(
@@ -123,14 +123,17 @@ fn union_clips_nested_and_touching_intervals_without_double_counting() {
 
 #[test]
 fn empty_and_point_only_schedules_leave_entire_window_free() {
-    let mut scheduler = Scheduler::<Item>::new();
+    let mut schedule_store = ScheduleStore::<Item>::new();
     let window = Fixture::window();
-    assert_eq!(scheduler.analyze(window).unwrap().gaps(), &[window.range]);
-    scheduler.insert(
+    assert_eq!(
+        schedule_store.analyze(window).unwrap().gaps(),
+        &[window.range]
+    );
+    schedule_store.insert(
         Item::Reminder,
         Schedule::once(Placement::instant(window.range.start(), Tz::UTC).unwrap()),
     );
-    let analysis = scheduler.analyze(window).unwrap();
+    let analysis = schedule_store.analyze(window).unwrap();
     assert_eq!(analysis.gaps(), &[window.range]);
     assert_eq!(analysis.longest_gap(), Some(window.range));
     assert_eq!(analysis.density().occupancy_ratio(), NO_OCCUPANCY);
@@ -144,20 +147,20 @@ fn empty_and_point_only_schedules_leave_entire_window_free() {
 
 #[test]
 fn alternatives_fit_gaps_and_rank_nearest_start_with_earlier_ties() {
-    let mut scheduler = Scheduler::new();
+    let mut schedule_store = ScheduleStore::new();
     Fixture::insert(
-        &mut scheduler,
+        &mut schedule_store,
         Item::Early,
         "2026-01-01T11:00:00Z",
         "2026-01-01T12:00:00Z",
     );
     Fixture::insert(
-        &mut scheduler,
+        &mut schedule_store,
         Item::Late,
         "2026-01-01T14:00:00Z",
         "2026-01-01T15:00:00Z",
     );
-    let analysis = scheduler.analyze(Fixture::window()).unwrap();
+    let analysis = schedule_store.analyze(Fixture::window()).unwrap();
     assert_eq!(
         analysis.longest_gap(),
         Some(Fixture::range(
@@ -203,10 +206,10 @@ fn alternatives_fit_gaps_and_rank_nearest_start_with_earlier_ties() {
 
 #[test]
 fn all_day_occupancy_uses_viewing_zone_and_actual_dst_duration() {
-    let mut scheduler = Scheduler::new();
+    let mut schedule_store = ScheduleStore::new();
     let start: NaiveDate = "2026-03-29".parse().unwrap();
     let end: NaiveDate = "2026-03-30".parse().unwrap();
-    scheduler.insert(
+    schedule_store.insert(
         Item::Early,
         Schedule::once(Placement::all_day(start, end).unwrap()),
     );
@@ -215,7 +218,7 @@ fn all_day_occupancy_uses_viewing_zone_and_actual_dst_duration() {
         all_day_zone: Tz::Europe__London,
         ..Fixture::window()
     };
-    let analysis = scheduler.analyze(window).unwrap();
+    let analysis = schedule_store.analyze(window).unwrap();
     assert_eq!(analysis.density().occupied(), SPRING_DAY);
     assert_eq!(analysis.density().occupancy_ratio(), FULL_OCCUPANCY);
     assert!(analysis.gaps().is_empty());
@@ -225,10 +228,10 @@ fn all_day_occupancy_uses_viewing_zone_and_actual_dst_duration() {
 
 #[test]
 fn overlapping_recurrences_keep_same_item_identity() {
-    let mut scheduler = Scheduler::new();
+    let mut schedule_store = ScheduleStore::new();
     let placement = Fixture::placement("2026-01-01T09:00:00Z", "2026-01-01T11:00:00Z");
     let recurrence = Recurrence::elapsed(APPOINTMENT, Termination::Forever).unwrap();
-    scheduler.insert(
+    schedule_store.insert(
         Item::Early,
         Schedule::repeating(placement, recurrence).unwrap(),
     );
@@ -236,7 +239,7 @@ fn overlapping_recurrences_keep_same_item_identity() {
         range: Fixture::range("2026-01-01T09:00:00Z", "2026-01-01T11:00:00Z"),
         ..Fixture::window()
     };
-    let analysis = scheduler.analyze(window).unwrap();
+    let analysis = schedule_store.analyze(window).unwrap();
     let mut pairs = analysis.overlaps();
     let pair = pairs.next().unwrap();
     assert_eq!(pair.first().item_id, pair.second().item_id);
@@ -253,7 +256,7 @@ fn overlapping_recurrences_keep_same_item_identity() {
 
 #[test]
 fn cancellations_and_moves_control_effective_occupancy() {
-    let mut scheduler = Scheduler::new();
+    let mut schedule_store = ScheduleStore::new();
     let original = Fixture::placement("2026-01-01T08:00:00Z", "2026-01-01T09:00:00Z");
     let key = OccurrenceKey::Calendar(original.local_start());
     let mut schedule = Schedule::once(original);
@@ -267,20 +270,20 @@ fn cancellations_and_moves_control_effective_occupancy() {
             NonZeroUsize::new(WORK_BUDGET).unwrap(),
         )
         .unwrap();
-    scheduler.insert(Item::Early, schedule);
+    schedule_store.insert(Item::Early, schedule);
     Fixture::insert(
-        &mut scheduler,
+        &mut schedule_store,
         Item::Nested,
         "2026-01-01T10:00:00Z",
         "2026-01-01T11:00:00Z",
     );
-    let analysis = scheduler.analyze(Fixture::window()).unwrap();
+    let analysis = schedule_store.analyze(Fixture::window()).unwrap();
     assert_eq!(
         analysis.overlaps().next().unwrap().first().occurrence.key(),
         key
     );
     assert_eq!(analysis.density().occupied(), APPOINTMENT);
-    scheduler
+    schedule_store
         .get_mut(&Item::Early)
         .unwrap()
         .set_override(
@@ -290,7 +293,7 @@ fn cancellations_and_moves_control_effective_occupancy() {
         )
         .unwrap();
     assert!(
-        scheduler
+        schedule_store
             .analyze(Fixture::window())
             .unwrap()
             .overlaps()
@@ -301,28 +304,28 @@ fn cancellations_and_moves_control_effective_occupancy() {
 
 #[test]
 fn analysis_propagates_shared_query_budget_failures() {
-    let mut scheduler = Scheduler::new();
+    let mut schedule_store = ScheduleStore::new();
     Fixture::insert(
-        &mut scheduler,
+        &mut schedule_store,
         Item::Early,
         "2026-01-01T10:00:00Z",
         "2026-01-01T11:00:00Z",
     );
     Fixture::insert(
-        &mut scheduler,
+        &mut schedule_store,
         Item::Late,
         "2026-01-01T12:00:00Z",
         "2026-01-01T13:00:00Z",
     );
     assert!(matches!(
-        scheduler.analyze(QueryWindow {
+        schedule_store.analyze(QueryWindow {
             candidate_limit: NonZeroUsize::MIN,
             ..Fixture::window()
         }),
         Err(Error::CandidateLimit)
     ));
     assert!(matches!(
-        scheduler.analyze(QueryWindow {
+        schedule_store.analyze(QueryWindow {
             occurrence_limit: NonZeroUsize::MIN,
             ..Fixture::window()
         }),
@@ -332,17 +335,17 @@ fn analysis_propagates_shared_query_budget_failures() {
 
 #[test]
 fn conflict_pairs_are_complete_and_clipped_with_equal_starts() {
-    let mut scheduler = Scheduler::new();
+    let mut schedule_store = ScheduleStore::new();
     for item in [Item::Early, Item::Nested, Item::Crossing] {
         Fixture::insert(
-            &mut scheduler,
+            &mut schedule_store,
             item,
             "2026-01-01T08:00:00Z",
             "2026-01-01T18:00:00Z",
         );
     }
     let window = Fixture::window();
-    let analysis = scheduler.analyze(window).unwrap();
+    let analysis = schedule_store.analyze(window).unwrap();
     let pairs: Vec<_> = analysis
         .overlaps()
         .map(|pair| (pair.first().item_id, pair.second().item_id, pair.range()))
@@ -365,9 +368,9 @@ fn conflict_pairs_are_complete_and_clipped_with_equal_starts() {
 
 #[test]
 fn extreme_and_subsecond_windows_preserve_duration_and_suggestion_bounds() {
-    let scheduler = Scheduler::<Item>::new();
+    let schedule_store = ScheduleStore::<Item>::new();
     let full_range = DateRange::new(DateTime::<Utc>::MIN_UTC, DateTime::<Utc>::MAX_UTC).unwrap();
-    let analysis = scheduler
+    let analysis = schedule_store
         .analyze(QueryWindow {
             range: full_range,
             ..Fixture::window()
@@ -382,7 +385,7 @@ fn extreme_and_subsecond_windows_preserve_duration_and_suggestion_bounds() {
         vec![last_slot]
     );
     assert_eq!(analysis.density().free(), full_range.duration());
-    let tiny = scheduler
+    let tiny = schedule_store
         .analyze(QueryWindow {
             range: last_slot,
             ..Fixture::window()

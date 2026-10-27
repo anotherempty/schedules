@@ -2,8 +2,8 @@ use std::num::{NonZeroU32, NonZeroUsize};
 
 use schedules_core::{
     CalendarRule, DateRange, DateTime, Error, Frequency, NaiveDateTime, OccurrenceKey,
-    OccurrenceOverride, Placement, QueryWindow, Recurrence, ResolutionPolicy, Schedule, Scheduler,
-    Termination, Utc,
+    OccurrenceOverride, Placement, QueryWindow, Recurrence, ResolutionPolicy, Schedule,
+    ScheduleStore, Termination, Utc,
 };
 
 const CANDIDATE_BUDGET: usize = 100;
@@ -15,8 +15,8 @@ const ONE_ITEM: usize = 1;
 
 #[test]
 fn exact_inspection_budget_allows_future_schedule_without_candidates() {
-    let mut scheduler = Scheduler::new();
-    scheduler.insert(
+    let mut schedule_store = ScheduleStore::new();
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::once(Fixture::point("2026-02-01 09:00:00")),
     );
@@ -24,15 +24,18 @@ fn exact_inspection_budget_allows_future_schedule_without_candidates() {
         candidate_limit: NonZeroUsize::MIN,
         ..Fixture::window()
     };
-    assert!(scheduler.occurrences(window).unwrap().is_empty());
-    scheduler.insert(
+    assert!(schedule_store.occurrences(window).unwrap().is_empty());
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::once(Fixture::point("2026-01-01 09:00:00")),
     );
-    assert_eq!(scheduler.occurrences(window), Err(Error::CandidateLimit));
+    assert_eq!(
+        schedule_store.occurrences(window),
+        Err(Error::CandidateLimit)
+    );
 }
 
-// Deliberately non-Clone: scheduler queries must borrow identity.
+// Deliberately non-Clone: schedule store queries must borrow identity.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ItemId {
     Meeting,
@@ -77,29 +80,29 @@ impl Fixture {
 
 #[test]
 fn insert_replace_lookup_and_remove_transfer_schedule_ownership() {
-    let mut scheduler = Scheduler::new();
-    assert!(scheduler.is_empty());
+    let mut schedule_store = ScheduleStore::new();
+    assert!(schedule_store.is_empty());
     assert!(
-        scheduler
+        schedule_store
             .insert(
                 ItemId::Meeting,
                 Schedule::once(Fixture::point("2026-01-01 09:00:00"))
             )
             .is_none()
     );
-    assert_eq!(scheduler.len(), ONE_ITEM);
+    assert_eq!(schedule_store.len(), ONE_ITEM);
     let replacement = Schedule::once(Fixture::point("2026-01-01 12:00:00"));
-    let previous = scheduler
+    let previous = schedule_store
         .insert(ItemId::Meeting, replacement.clone())
         .unwrap();
     assert_eq!(previous.placement(), Fixture::point("2026-01-01 09:00:00"));
-    assert_eq!(scheduler.get(&ItemId::Meeting), Some(&replacement));
-    assert_eq!(scheduler.iter().next().unwrap().0, &ItemId::Meeting);
-    assert!(scheduler.get(&ItemId::Reminder).is_none());
-    assert!(scheduler.get_mut(&ItemId::Reminder).is_none());
-    assert_eq!(scheduler.remove(&ItemId::Meeting), Some(replacement));
-    assert!(scheduler.remove(&ItemId::Meeting).is_none());
-    assert!(scheduler.is_empty());
+    assert_eq!(schedule_store.get(&ItemId::Meeting), Some(&replacement));
+    assert_eq!(schedule_store.iter().next().unwrap().0, &ItemId::Meeting);
+    assert!(schedule_store.get(&ItemId::Reminder).is_none());
+    assert!(schedule_store.get_mut(&ItemId::Reminder).is_none());
+    assert_eq!(schedule_store.remove(&ItemId::Meeting), Some(replacement));
+    assert!(schedule_store.remove(&ItemId::Meeting).is_none());
+    assert!(schedule_store.is_empty());
 }
 
 #[test]
@@ -110,12 +113,12 @@ fn cross_item_results_sort_by_start_then_id_and_keep_identity_scoped() {
         Termination::Count(NonZeroU32::new(TWO_OCCURRENCES).unwrap()),
     )
     .unwrap();
-    let mut scheduler = Scheduler::new();
-    scheduler.insert(
+    let mut schedule_store = ScheduleStore::new();
+    schedule_store.insert(
         ItemId::Reminder,
         Schedule::once(Fixture::point("2026-01-01 09:00:00")),
     );
-    scheduler.insert(
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::repeating(
             Fixture::point("2026-01-01 09:00:00"),
@@ -123,7 +126,7 @@ fn cross_item_results_sort_by_start_then_id_and_keep_identity_scoped() {
         )
         .unwrap(),
     );
-    let results = scheduler.occurrences(Fixture::window()).unwrap();
+    let results = schedule_store.occurrences(Fixture::window()).unwrap();
     assert_eq!(
         results.iter().map(|item| item.item_id).collect::<Vec<_>>(),
         [&ItemId::Meeting, &ItemId::Reminder, &ItemId::Meeting]
@@ -134,7 +137,7 @@ fn cross_item_results_sort_by_start_then_id_and_keep_identity_scoped() {
     assert_eq!(meeting.occurrence.key(), reminder.occurrence.key());
     assert!(std::ptr::eq(
         meeting.item_id,
-        scheduler.iter().next().unwrap().0
+        schedule_store.iter().next().unwrap().0
     ));
     let copied = *meeting;
     assert_eq!(copied, *meeting);
@@ -142,16 +145,16 @@ fn cross_item_results_sort_by_start_then_id_and_keep_identity_scoped() {
 
 #[test]
 fn per_item_mutation_applies_overrides_without_affecting_other_items() {
-    let mut scheduler = Scheduler::new();
-    scheduler.insert(
+    let mut schedule_store = ScheduleStore::new();
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::once(Fixture::point("2026-01-01 09:00:00")),
     );
-    scheduler.insert(
+    schedule_store.insert(
         ItemId::Reminder,
         Schedule::once(Fixture::point("2026-01-01 09:00:00")),
     );
-    scheduler
+    schedule_store
         .get_mut(&ItemId::Meeting)
         .unwrap()
         .set_override(
@@ -161,7 +164,7 @@ fn per_item_mutation_applies_overrides_without_affecting_other_items() {
         )
         .unwrap();
     assert_eq!(
-        scheduler
+        schedule_store
             .occurrences(Fixture::window())
             .unwrap()
             .iter()
@@ -173,39 +176,48 @@ fn per_item_mutation_applies_overrides_without_affecting_other_items() {
 
 #[test]
 fn budgets_apply_globally_including_schedules_with_no_matching_results() {
-    let mut scheduler = Scheduler::new();
-    scheduler.insert(
+    let mut schedule_store = ScheduleStore::new();
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::once(Fixture::point("2026-01-01 09:00:00")),
     );
-    scheduler.insert(
+    schedule_store.insert(
         ItemId::Reminder,
         Schedule::once(Fixture::point("2026-01-01 10:00:00")),
     );
     let mut window = Fixture::window();
     window.occurrence_limit = NonZeroUsize::MIN;
-    assert_eq!(scheduler.occurrences(window), Err(Error::OccurrenceLimit));
+    assert_eq!(
+        schedule_store.occurrences(window),
+        Err(Error::OccurrenceLimit)
+    );
     window.occurrence_limit = NonZeroUsize::new(RESULT_BUDGET).unwrap();
     window.candidate_limit = NonZeroUsize::new(ONE_SCHEDULE_WORK).unwrap();
-    assert_eq!(scheduler.occurrences(window), Err(Error::CandidateLimit));
+    assert_eq!(
+        schedule_store.occurrences(window),
+        Err(Error::CandidateLimit)
+    );
     window.candidate_limit = NonZeroUsize::new(TWO_SCHEDULES_WORK).unwrap();
-    assert!(scheduler.occurrences(window).is_ok());
-    scheduler.insert(
+    assert!(schedule_store.occurrences(window).is_ok());
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::once(Fixture::point("2025-01-01 09:00:00")),
     );
-    scheduler.insert(
+    schedule_store.insert(
         ItemId::Reminder,
         Schedule::once(Fixture::point("2025-01-01 10:00:00")),
     );
     window.candidate_limit = NonZeroUsize::new(ONE_SCHEDULE_WORK).unwrap();
-    assert_eq!(scheduler.occurrences(window), Err(Error::CandidateLimit));
+    assert_eq!(
+        schedule_store.occurrences(window),
+        Err(Error::CandidateLimit)
+    );
 }
 
 #[test]
-fn empty_scheduler_returns_no_results() {
+fn empty_schedule_store_returns_no_results() {
     assert!(
-        Scheduler::<ItemId>::default()
+        ScheduleStore::<ItemId>::default()
             .occurrences(Fixture::window())
             .unwrap()
             .is_empty()
@@ -222,8 +234,8 @@ fn next_after_orders_ties_and_recurring_items() {
         Termination::Count(NonZeroU32::new(TWO_OCCURRENCES).unwrap()),
     )
     .unwrap();
-    let mut scheduler = Scheduler::new();
-    scheduler.insert(
+    let mut schedule_store = ScheduleStore::new();
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::repeating(
             Fixture::point("2026-01-01 09:00:00"),
@@ -231,7 +243,7 @@ fn next_after_orders_ties_and_recurring_items() {
         )
         .unwrap(),
     );
-    scheduler.insert(
+    schedule_store.insert(
         ItemId::Reminder,
         Schedule::once(Fixture::point("2026-01-01 09:00:00")),
     );
@@ -249,7 +261,7 @@ fn next_after_orders_ties_and_recurring_items() {
         (&ItemId::Meeting, second_key, None),
     ];
     for (item_id, key, expected) in cases {
-        let next = scheduler
+        let next = schedule_store
             .next_after(
                 item_id,
                 key,
@@ -263,8 +275,8 @@ fn next_after_orders_ties_and_recurring_items() {
             "anchor {item_id:?} {key:?}"
         );
     }
-    scheduler.remove(&ItemId::Reminder);
-    let next = scheduler
+    schedule_store.remove(&ItemId::Reminder);
+    let next = schedule_store
         .next_after(
             &ItemId::Meeting,
             first_key,
@@ -280,9 +292,9 @@ fn next_after_orders_ties_and_recurring_items() {
 #[test]
 fn next_after_resolves_moved_anchors_and_rejects_missing_anchors() {
     let key = OccurrenceKey::Calendar(Fixture::local("2026-01-01 09:00:00"));
-    let mut scheduler = Scheduler::new();
+    let mut schedule_store = ScheduleStore::new();
     assert_eq!(
-        scheduler.next_after(
+        schedule_store.next_after(
             &ItemId::Meeting,
             key,
             chrono_tz::UTC,
@@ -290,11 +302,11 @@ fn next_after_resolves_moved_anchors_and_rejects_missing_anchors() {
         ),
         Err(Error::InvalidOccurrenceKey)
     );
-    scheduler.insert(
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::once(Fixture::point("2026-01-01 09:00:00")),
     );
-    scheduler.insert(
+    schedule_store.insert(
         ItemId::Reminder,
         Schedule::once(Fixture::point("2026-01-02 09:00:00")),
     );
@@ -310,13 +322,13 @@ fn next_after_resolves_moved_anchors_and_rejects_missing_anchors() {
         (OccurrenceOverride::Cancel, Err(Error::InvalidOccurrenceKey)),
     ];
     for (change, expected) in changes {
-        scheduler
+        schedule_store
             .get_mut(&ItemId::Meeting)
             .unwrap()
             .set_override(key, change, NonZeroUsize::new(CANDIDATE_BUDGET).unwrap())
             .unwrap();
         assert_eq!(
-            scheduler.next_after(
+            schedule_store.next_after(
                 &ItemId::Meeting,
                 key,
                 chrono_tz::UTC,
@@ -331,17 +343,17 @@ fn next_after_resolves_moved_anchors_and_rejects_missing_anchors() {
 #[test]
 fn next_after_propagates_candidate_budget_errors() {
     let key = OccurrenceKey::Calendar(Fixture::local("2026-01-01 09:00:00"));
-    let mut scheduler = Scheduler::new();
-    scheduler.insert(
+    let mut schedule_store = ScheduleStore::new();
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::once(Fixture::point("2026-01-01 09:00:00")),
     );
-    scheduler.insert(
+    schedule_store.insert(
         ItemId::Reminder,
         Schedule::once(Fixture::point("2026-01-02 09:00:00")),
     );
     assert_eq!(
-        scheduler.next_after(&ItemId::Meeting, key, chrono_tz::UTC, NonZeroUsize::MIN),
+        schedule_store.next_after(&ItemId::Meeting, key, chrono_tz::UTC, NonZeroUsize::MIN),
         Err(Error::CandidateLimit)
     );
 }
@@ -350,9 +362,9 @@ fn next_after_propagates_candidate_budget_errors() {
 fn next_after_stops_at_first_successor_of_endless_recurrence() {
     // Anchor lookup: inspection + candidate. Successor: inspection + two candidates.
     const NEXT_SEARCH_WORK: usize = 5;
-    let mut scheduler = Scheduler::new();
+    let mut schedule_store = ScheduleStore::new();
     let rule = CalendarRule::new(Frequency::Daily, NonZeroU32::MIN, Termination::Forever).unwrap();
-    scheduler.insert(
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::repeating(
             Fixture::point("2026-01-01 09:00:00"),
@@ -360,7 +372,7 @@ fn next_after_stops_at_first_successor_of_endless_recurrence() {
         )
         .unwrap(),
     );
-    let next = scheduler
+    let next = schedule_store
         .next_after(
             &ItemId::Meeting,
             OccurrenceKey::Calendar(Fixture::local("2026-01-01 09:00:00")),
@@ -377,16 +389,16 @@ fn next_after_stops_at_first_successor_of_endless_recurrence() {
 
 #[test]
 fn next_after_finds_distant_successor_without_date_window() {
-    let mut scheduler = Scheduler::new();
-    scheduler.insert(
+    let mut schedule_store = ScheduleStore::new();
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::once(Fixture::point("2026-01-01 09:00:00")),
     );
-    scheduler.insert(
+    schedule_store.insert(
         ItemId::Reminder,
         Schedule::once(Fixture::point("2036-01-01 09:00:00")),
     );
-    let next = scheduler
+    let next = schedule_store
         .next_after(
             &ItemId::Meeting,
             OccurrenceKey::Calendar(Fixture::local("2026-01-01 09:00:00")),
@@ -404,7 +416,7 @@ fn next_after_finds_distant_successor_without_date_window() {
 
 #[test]
 fn next_after_selects_moved_occurrence_before_regular_successor() {
-    let mut scheduler = Scheduler::new();
+    let mut schedule_store = ScheduleStore::new();
     let rule = CalendarRule::new(Frequency::Daily, NonZeroU32::MIN, Termination::Forever).unwrap();
     let mut schedule = Schedule::repeating(
         Fixture::point("2026-01-01 09:00:00"),
@@ -420,8 +432,8 @@ fn next_after_selects_moved_occurrence_before_regular_successor() {
             NonZeroUsize::new(CANDIDATE_BUDGET).unwrap(),
         )
         .unwrap();
-    scheduler.insert(ItemId::Meeting, schedule);
-    let next = scheduler
+    schedule_store.insert(ItemId::Meeting, schedule);
+    let next = schedule_store
         .next_after(
             &ItemId::Meeting,
             anchor_key,
@@ -431,7 +443,7 @@ fn next_after_selects_moved_occurrence_before_regular_successor() {
         .unwrap()
         .unwrap();
     assert_eq!(next.occurrence.key(), moved_key);
-    let next = scheduler
+    let next = schedule_store
         .next_after(
             &ItemId::Meeting,
             moved_key,
@@ -448,13 +460,13 @@ fn next_after_selects_moved_occurrence_before_regular_successor() {
 
 #[test]
 fn next_after_resolves_all_day_order_in_viewing_timezone() {
-    let mut scheduler = Scheduler::new();
+    let mut schedule_store = ScheduleStore::new();
     let date = Fixture::local("2026-01-02 00:00:00").date();
-    scheduler.insert(
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::once(Fixture::point("2026-01-01 22:00:00")),
     );
-    scheduler.insert(
+    schedule_store.insert(
         ItemId::Reminder,
         Schedule::once(Placement::all_day(date, date.succ_opt().unwrap()).unwrap()),
     );
@@ -463,7 +475,7 @@ fn next_after_resolves_all_day_order_in_viewing_timezone() {
         (chrono_tz::UTC, Some(&ItemId::Reminder)),
         (chrono_tz::Africa::Nairobi, None),
     ] {
-        let next = scheduler
+        let next = schedule_store
             .next_after(
                 &ItemId::Meeting,
                 key,
@@ -485,12 +497,12 @@ fn next_after_seeks_old_calendar_rules_with_small_budget() {
         Termination::Until(Fixture::local("2026-01-02 09:00:00")),
     ] {
         let rule = CalendarRule::new(Frequency::Daily, NonZeroU32::MIN, termination).unwrap();
-        let mut scheduler = Scheduler::new();
-        scheduler.insert(
+        let mut schedule_store = ScheduleStore::new();
+        schedule_store.insert(
             ItemId::Meeting,
             Schedule::repeating(old_start, Recurrence::calendar(rule)).unwrap(),
         );
-        let next = scheduler
+        let next = schedule_store
             .next_after(
                 &ItemId::Meeting,
                 anchor_key,
@@ -505,7 +517,7 @@ fn next_after_seeks_old_calendar_rules_with_small_budget() {
         );
         if matches!(termination, Termination::Until(_)) {
             assert_eq!(
-                scheduler.next_after(
+                schedule_store.next_after(
                     &ItemId::Meeting,
                     next.occurrence.key(),
                     chrono_tz::UTC,
@@ -532,8 +544,8 @@ fn next_after_seeks_elapsed_count_with_nanosecond_precision() {
         Termination::Count(NonZeroU32::new(SERIES_COUNT).unwrap()),
     )
     .unwrap();
-    let mut scheduler = Scheduler::new();
-    scheduler.insert(
+    let mut schedule_store = ScheduleStore::new();
+    schedule_store.insert(
         ItemId::Meeting,
         Schedule::repeating(
             Placement::instant(start, chrono_tz::UTC).unwrap(),
@@ -541,7 +553,7 @@ fn next_after_seeks_elapsed_count_with_nanosecond_precision() {
         )
         .unwrap(),
     );
-    let next = scheduler
+    let next = schedule_store
         .next_after(
             &ItemId::Meeting,
             OccurrenceKey::Elapsed(last - interval),
@@ -552,7 +564,7 @@ fn next_after_seeks_elapsed_count_with_nanosecond_precision() {
         .unwrap();
     assert_eq!(next.occurrence.key(), OccurrenceKey::Elapsed(last));
     assert_eq!(
-        scheduler.next_after(
+        schedule_store.next_after(
             &ItemId::Meeting,
             OccurrenceKey::Elapsed(last),
             chrono_tz::UTC,
@@ -565,7 +577,7 @@ fn next_after_seeks_elapsed_count_with_nanosecond_precision() {
         last - schedules_core::Duration::nanoseconds(OFF_GRID_NANOSECONDS),
     ] {
         assert_eq!(
-            scheduler.next_after(
+            schedule_store.next_after(
                 &ItemId::Meeting,
                 OccurrenceKey::Elapsed(invalid),
                 chrono_tz::UTC,
@@ -599,8 +611,8 @@ fn next_after_seek_matches_expansion_across_dst_and_count_limits() {
                 let rule = CalendarRule::new(Frequency::Daily, NonZeroU32::MIN, termination)
                     .unwrap()
                     .with_times([local.time(), second_time]);
-                let mut scheduler = Scheduler::new();
-                scheduler.insert(
+                let mut schedule_store = ScheduleStore::new();
+                schedule_store.insert(
                     ItemId::Meeting,
                     Schedule::repeating(
                         Placement::point(local, zone, ResolutionPolicy::new(policy)).unwrap(),
@@ -614,9 +626,9 @@ fn next_after_seek_matches_expansion_across_dst_and_count_limits() {
                     candidate_limit: NonZeroUsize::new(DST_CANDIDATE_BUDGET).unwrap(),
                     occurrence_limit: NonZeroUsize::new(DST_RESULT_BUDGET).unwrap(),
                 };
-                let reference = scheduler.occurrences(window).unwrap();
+                let reference = schedule_store.occurrences(window).unwrap();
                 for (anchor, expected) in reference.iter().zip(reference.iter().skip(1)) {
-                    let actual = scheduler
+                    let actual = schedule_store
                         .next_after(
                             anchor.item_id,
                             anchor.occurrence.key(),

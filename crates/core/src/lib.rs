@@ -1,7 +1,7 @@
 //! Calendar-aware schedule definitions and bounded occurrence expansion.
 //!
 //! Build a [`Placement`], attach an optional [`Recurrence`] with [`Schedule`],
-//! then query a [`QueryWindow`]. [`Scheduler`] associates schedules with
+//! then query a [`QueryWindow`]. [`ScheduleStore`] associates schedules with
 //! application identifiers and queries across them.
 //!
 //! Calendar rules preserve local wall time; elapsed rules preserve exact UTC
@@ -40,7 +40,7 @@ mod occurrence;
 mod query;
 mod recurrence;
 mod schedule;
-mod scheduler;
+mod schedule_store;
 mod temporal;
 
 #[doc(inline)]
@@ -62,6 +62,6 @@ pub use recurrence::{CalendarRule, Frequency, Recurrence, Termination, TimeSet, 
 #[doc(inline)]
 pub use schedule::{Occurrences, Schedule};
 #[doc(inline)]
-pub use scheduler::{ScheduledOccurrence, Scheduler};
+pub use schedule_store::{ScheduleStore, ScheduledOccurrence};
 #[doc(inline)]
 pub use temporal::{AmbiguityPolicy, Placement, ResolutionPolicy};

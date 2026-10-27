@@ -11,7 +11,7 @@ use crate::{DateRange, Error, Occurrence, OccurrenceKey, Placement};
 ///
 /// Points match when contained in `range`; intervals match when overlapping it.
 /// Limits produce errors rather than silently truncating results. See
-/// [`crate::Schedule::iter`] and [`crate::Scheduler::occurrences`] for budget scope.
+/// [`crate::Schedule::iter`] and [`crate::ScheduleStore::occurrences`] for budget scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryWindow {
     /// UTC interval to query, including its start and excluding its end.
@@ -24,7 +24,7 @@ pub struct QueryWindow {
     /// Maximum work units for candidate expansion and override inspection.
     ///
     /// Skipped dates and candidates outside the window also consume budget.
-    /// Scheduler queries additionally charge for inspecting each schedule.
+    /// Schedule store queries additionally charge for inspecting each schedule.
     pub candidate_limit: NonZeroUsize,
     /// Maximum matching occurrences returned before reporting [`Error::OccurrenceLimit`].
     pub occurrence_limit: NonZeroUsize,
