@@ -45,6 +45,10 @@ mod temporal;
 
 #[doc(inline)]
 pub use analysis::{Overlap, ScheduleAnalysis, ScheduleDensity};
+/// Generic calendar views, available with the `calendar-views` feature.
+#[cfg(feature = "calendar-views")]
+#[doc(inline)]
+pub use calendar_views as calendar;
 #[doc(inline)]
 pub use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc, Weekday};
 #[doc(inline)]

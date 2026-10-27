@@ -3,7 +3,12 @@ name = "schedules-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+calendar-views = ["dep:calendar-views"]
+
 [dependencies]
+calendar-views = { workspace = true, optional = true }
 chrono.workspace = true
 chrono-tz.workspace = true
 thiserror.workspace = true
@@ -14,3 +19,7 @@ criterion.workspace = true
 [[bench]]
 name = "schedule_store"
 harness = false
+
+[[test]]
+name = "calendar_views"
+required-features = ["calendar-views"]

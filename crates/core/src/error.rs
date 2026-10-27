@@ -6,6 +6,10 @@ use chrono_tz::Tz;
 /// Failures in construction, local-time resolution, or bounded expansion.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
+    /// Calendar-view date or timezone boundary construction failed.
+    #[cfg(feature = "calendar-views")]
+    #[error(transparent)]
+    CalendarView(#[from] calendar_views::Error),
     /// An interval end is not later than its start.
     #[error("end must be later than start")]
     InvalidRange,

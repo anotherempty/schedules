@@ -1,7 +1,13 @@
 # Schedules
 
-Rust library for calendar-aware placement and recurrence. Workspace library:
-`crates/core` (`schedules-core`). No runtime or persistence required.
+Rust libraries for calendar-aware placement, recurrence, and generic calendar views.
+No runtime or persistence required.
+
+1. `crates/calendar-views` (`calendar-views`): standalone day/week grouping for
+   arbitrary owned or borrowed payloads paired with UTC points or intervals.
+2. `crates/core` (`schedules-core`): schedule definitions and occurrence queries;
+   optionally depends on `calendar-views` and adapts its results. Dependency runs only from
+   core to calendar views.
 
 `ScheduleStore<ItemId>` owns an in-memory map of item IDs to schedules. `insert` adds
 or replaces a complete schedule and returns the previous value. `get`, `get_mut`,
@@ -39,6 +45,40 @@ because skipped dates, timezone gaps, and excluded weekdays do not count as occu
    regular occurrences in recurrence order. First error terminates iteration.
 7. `Schedule::occurrences`: collect and sort overlapping occurrences by UTC start,
    then original occurrence key. Errors discard partial results.
+
+## Calendar views
+
+Core's `calendar-views` feature is disabled by default. Enable it to include the
+optional dependency, `calendar` re-export, calendar query methods, and
+`Error::CalendarView`:
+
+```toml
+schedules-core = { version = "0.1", features = ["calendar-views"] }
+```
+
+The standalone `calendar-views` crate remains usable independently.
+
+`ScheduleStore::calendar(window, candidate_limit, occurrence_limit)` creates a
+generic calendar snapshot from a `calendar::CalendarWindow`. Core re-exports the
+standalone crate as `schedules_core::calendar`. The filtered variant
+`calendar_filtered(window, candidate_limit, occurrence_limit, predicate)` accepts
+the same item-aware predicate as `occurrences_filtered`.
+
+Expansion and its budgets apply once across the complete window. The snapshot
+owns occurrence records borrowing item IDs; original keys and effective placements
+survive grouping. Stored exclusions and overrides apply before view construction.
+Spanning occurrences consume one result slot even if displayed on multiple days.
+
+`snapshot.days()` lazily yields local dates and overlapping entries, including empty
+days. `snapshot.weeks(weekday)` yields seven day positions per week; outside-window
+positions are `None`. Use `window.covering_weeks(weekday)` before querying for full
+weeks, so padded dates also have their occurrences fetched.
+
+Local midnight boundaries follow DST, choosing the earlier instant for ambiguity
+and returning typed errors for nonexistent midnight. Interior boundary errors
+occur during iteration; both iterators stop permanently after errors. Calendar
+view errors convert into `Error::CalendarView` when returned through core.
+See [calendar-views](crates/calendar-views/README.md) for standalone usage and costs.
 
 ## Holidays and custom exclusions
 
@@ -180,6 +220,7 @@ event lengths, and iCalendar/Google adapters are not implemented.
 
 ```sh
 cargo test --workspace
+cargo test --workspace --all-features
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```

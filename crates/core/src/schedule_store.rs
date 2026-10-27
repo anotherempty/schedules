@@ -2,10 +2,14 @@
 
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
+#[cfg(feature = "calendar-views")]
+use calendar_views::{Calendar, CalendarEntry, CalendarWindow, TimeSpan};
 use chrono_tz::Tz;
 
 use crate::query::{OccurrencePosition, SearchBudget};
 
+#[cfg(feature = "calendar-views")]
+use crate::DateRange;
 use crate::{Error, Occurrence, OccurrenceKey, QueryWindow, Schedule, ScheduleAnalysis};
 
 /// In-memory schedules keyed by application-owned item identifiers.
@@ -63,6 +67,83 @@ impl<ItemId: Ord> ScheduleStore<ItemId> {
         &self,
     ) -> impl DoubleEndedIterator<Item = (&ItemId, &Schedule)> + ExactSizeIterator {
         self.schedules.iter()
+    }
+
+    /// Expands occurrences once into a generic calendar snapshot for local-date views.
+    ///
+    /// Returned entries retain borrowed item IDs, original keys, and effective
+    /// placements. Stored exclusions apply. The snapshot's day/week iterators group
+    /// data lazily without rerunning recurrence expansion. Budgets apply once across
+    /// the full UTC window; a spanning occurrence is counted once, not once per day.
+    /// Use `window.covering_weeks(weekday)` before this call for complete weeks.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// use schedules_core::{Error, NaiveDate, ScheduleStore, Tz};
+    /// use schedules_core::calendar::CalendarWindow;
+    /// let start = NaiveDate::default();
+    /// let end = start.succ_opt().ok_or(Error::OutOfRange)?;
+    /// let store: ScheduleStore<u64> = ScheduleStore::new();
+    /// let snapshot = store.calendar(CalendarWindow::new(start, end, Tz::UTC)?,
+    ///     NonZeroUsize::MIN, NonZeroUsize::MIN)?;
+    /// let days = snapshot.days().collect::<Result<Vec<_>, _>>()?;
+    /// assert_eq!(days.first().map(|day| day.date()), Some(start));
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Propagates occurrence expansion, timezone, and budget errors. Returns
+    /// [`Error::CalendarView`] if an effective span cannot form a valid interval.
+    /// Interior day-boundary errors arise during later day/week iteration.
+    #[cfg(feature = "calendar-views")]
+    pub fn calendar(
+        &self,
+        window: CalendarWindow,
+        candidate_limit: NonZeroUsize,
+        occurrence_limit: NonZeroUsize,
+    ) -> Result<Calendar<ScheduledOccurrence<'_, ItemId>>, Error> {
+        self.calendar_filtered(window, candidate_limit, occurrence_limit, |_, _| true)
+    }
+
+    /// Creates a calendar snapshot after applying an item-aware occurrence predicate.
+    ///
+    /// Filtering semantics match [`Self::occurrences_filtered`]; rejected occurrences
+    /// consume work but no result slots. All-day bounds use the viewing timezone.
+    /// Calendar grouping does not modify original occurrence keys or placements.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the same errors as [`Self::calendar`], discarding partial snapshots.
+    #[cfg(feature = "calendar-views")]
+    pub fn calendar_filtered(
+        &self,
+        window: CalendarWindow,
+        candidate_limit: NonZeroUsize,
+        occurrence_limit: NonZeroUsize,
+        filter: impl FnMut(&ItemId, &Occurrence) -> bool,
+    ) -> Result<Calendar<ScheduledOccurrence<'_, ItemId>>, Error> {
+        let query = QueryWindow {
+            range: DateRange::new(window.utc_start(), window.utc_end())?,
+            all_day_zone: window.timezone(),
+            candidate_limit,
+            occurrence_limit,
+        };
+        let entries = self
+            .occurrences_filtered(query, filter)?
+            .into_iter()
+            .map(|entry| {
+                let (start, end) = entry.occurrence.placement().bounds(window.timezone())?;
+                let span = match end {
+                    Some(end) => TimeSpan::interval(start, end)?,
+                    None => TimeSpan::point(start),
+                };
+                Ok(CalendarEntry::new(entry, span))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Calendar::new(window, entries))
     }
 
     /// Analyzes occupied time, free gaps, and conflicts within a query window.
