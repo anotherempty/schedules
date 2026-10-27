@@ -1,23 +1,37 @@
 //! Calendar-aware schedule definitions and bounded occurrence expansion.
 //!
-//! Calendar rules preserve local wall time. Elapsed rules preserve exact duration.
-//! All intervals and query windows use inclusive starts and exclusive ends.
+//! Build a [`Placement`], attach an optional [`Recurrence`] with [`Schedule`],
+//! then query a [`QueryWindow`]. [`Scheduler`] associates schedules with
+//! application identifiers and queries across them.
+//!
+//! Calendar rules preserve local wall time; elapsed rules preserve exact UTC
+//! spacing. All intervals and query windows have inclusive starts and exclusive
+//! ends. All-day dates resolve in the query's viewing timezone.
+//!
+//! Use [`Schedule::iter`] for lazy, fallible expansion or
+//! [`Schedule::occurrences`] for sorted results. Both require explicit candidate
+//! and occurrence budgets. [`OccurrenceKey`] retains original identity when an
+//! [`OccurrenceOverride`] moves or cancels an occurrence.
+//!
+//! # Examples
 //!
 //! ```
-//! use std::num::NonZeroU32;
-//! use schedules_core::{CalendarRule, Error, Frequency, NaiveDateTime, Placement,
-//!     Recurrence, ResolutionPolicy, Schedule, Termination, Tz};
-//!
-//! fn daily_at(start: NaiveDateTime, zone: Tz) -> Result<Schedule, Error> {
-//!     let placement = Placement::point(start, zone, ResolutionPolicy::default())?;
-//!     let rule = CalendarRule::new(Frequency::Daily, NonZeroU32::MIN,
-//!         Termination::Forever)?;
-//!     Schedule::repeating(placement, Recurrence::calendar(rule))
-//! }
+//! use std::num::NonZeroUsize;
+//! use schedules_core::{DateRange, DateTime, Duration, Error, Placement, QueryWindow, Schedule, Tz};
+//! const WINDOW_LENGTH: Duration = Duration::days(1);
+//! let start = DateTime::UNIX_EPOCH;
+//! let end = start.checked_add_signed(WINDOW_LENGTH).ok_or(Error::OutOfRange)?;
+//! let schedule = Schedule::once(Placement::instant(start, Tz::UTC)?);
+//! let window = QueryWindow {
+//!     range: DateRange::new(start, end)?,
+//!     all_day_zone: Tz::UTC,
+//!     candidate_limit: NonZeroUsize::MIN,
+//!     occurrence_limit: NonZeroUsize::MIN,
+//! };
+//! let occurrences = schedule.occurrences(window)?;
+//! assert_eq!(occurrences.first().map(|entry| entry.placement()), Some(schedule.placement()));
+//! # Ok::<(), Error>(())
 //! ```
-//!
-//! Use [`Schedule::iter`] for lazy expansion or [`Schedule::occurrences`] for sorted results.
-//! Both require a [`QueryWindow`] with explicit candidate and occurrence budgets.
 
 mod date_range;
 mod error;
@@ -28,13 +42,23 @@ mod schedule;
 mod scheduler;
 mod temporal;
 
+#[doc(inline)]
 pub use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc, Weekday};
+#[doc(inline)]
 pub use chrono_tz::Tz;
+#[doc(inline)]
 pub use date_range::DateRange;
+#[doc(inline)]
 pub use error::Error;
+#[doc(inline)]
 pub use occurrence::{Occurrence, OccurrenceKey, OccurrenceOverride};
+#[doc(inline)]
 pub use query::QueryWindow;
+#[doc(inline)]
 pub use recurrence::{CalendarRule, Frequency, Recurrence, Termination, TimeSet, WeekdaySet};
+#[doc(inline)]
 pub use schedule::{Occurrences, Schedule};
+#[doc(inline)]
 pub use scheduler::{ScheduledOccurrence, Scheduler};
+#[doc(inline)]
 pub use temporal::{AmbiguityPolicy, Placement, ResolutionPolicy};

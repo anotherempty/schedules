@@ -1,3 +1,5 @@
+//! Application-owned schedule collections and queries across their occurrences.
+
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use chrono_tz::Tz;
@@ -21,6 +23,7 @@ impl<ItemId> Default for Scheduler<ItemId> {
 }
 
 impl<ItemId: Ord> Scheduler<ItemId> {
+    /// Creates an empty scheduler keyed by ordered application identifiers.
     pub fn new() -> Self {
         Self::default()
     }
@@ -30,53 +33,85 @@ impl<ItemId: Ord> Scheduler<ItemId> {
         self.schedules.insert(item_id, schedule)
     }
 
+    /// Borrows an item schedule, or returns `None` when the item is absent.
     pub fn get(&self, item_id: &ItemId) -> Option<&Schedule> {
         self.schedules.get(item_id)
     }
 
-    /// Mutable access supports validated per-occurrence overrides.
+    /// Mutably borrows an item schedule, or returns `None` when the item is absent.
     pub fn get_mut(&mut self, item_id: &ItemId) -> Option<&mut Schedule> {
         self.schedules.get_mut(item_id)
     }
 
+    /// Removes and returns an item schedule, or `None` when the item is absent.
     pub fn remove(&mut self, item_id: &ItemId) -> Option<Schedule> {
         self.schedules.remove(item_id)
     }
 
+    /// Returns the number of stored schedules, including those with no query matches.
     pub fn len(&self) -> usize {
         self.schedules.len()
     }
 
+    /// Returns whether no schedules are stored.
     pub fn is_empty(&self) -> bool {
         self.schedules.is_empty()
     }
 
+    /// Yields borrowed identifiers and schedules in ascending identifier order.
     pub fn iter(
         &self,
     ) -> impl DoubleEndedIterator<Item = (&ItemId, &Schedule)> + ExactSizeIterator {
         self.schedules.iter()
     }
 
-    /// Return the next occurrence after an item's occurrence across all schedules.
+    /// Returns the next occurrence after an item occurrence across all schedules.
     ///
     /// Orders by UTC start, item ID, then original occurrence key, as in
-    /// [`Self::occurrences`]. The successor can belong to the same item or share
-    /// the anchor's start time. Overrides determine actual placement; cancelled
+    /// [`Self::occurrences`]. The successor may belong to the same item or share
+    /// the anchor start time. Overrides determine effective placement; cancelled
     /// anchors are invalid. All-day starts use `all_day_zone`.
     ///
-    /// Searches without a date window and retains only one successor per schedule.
-    /// `None` means all schedules were exhausted without a successor.
-    /// The shared candidate budget covers anchor resolution, schedule inspections,
-    /// overrides, and recurrence candidates (including skipped dates).
+    /// No date window is required. `None` means every schedule was exhausted without
+    /// a successor. The shared candidate budget covers anchor resolution, schedule
+    /// inspections, overrides, and recurrence candidates, including skipped dates.
+    /// Count-limited calendar rules may require scanning historical candidates to
+    /// determine membership, so distant anchors can require larger budgets.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// use schedules_core::{DateTime, Duration, Error, OccurrenceKey, Placement, Recurrence,
+    ///     Schedule, Scheduler, Termination, Tz};
+    /// #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+    /// enum ItemId { Poll }
+    /// const POLL_INTERVAL: Duration = Duration::hours(1);
+    /// const SEARCH_WORK_UNITS: usize = 16;
+    /// let start = DateTime::UNIX_EPOCH;
+    /// let schedule = Schedule::repeating(
+    ///     Placement::instant(start, Tz::UTC)?,
+    ///     Recurrence::elapsed(POLL_INTERVAL, Termination::Forever)?,
+    /// )?;
+    /// let mut scheduler = Scheduler::new();
+    /// scheduler.insert(ItemId::Poll, schedule);
+    /// let next = scheduler.next_after(
+    ///     &ItemId::Poll, OccurrenceKey::Elapsed(start), Tz::UTC,
+    ///     NonZeroUsize::new(SEARCH_WORK_UNITS).ok_or(Error::OutOfRange)?,
+    /// )?;
+    /// assert_eq!(next.map(|entry| entry.occurrence.key()),
+    ///     Some(OccurrenceKey::Elapsed(start.checked_add_signed(POLL_INTERVAL).ok_or(Error::OutOfRange)?)));
+    /// # Ok::<(), Error>(())
+    /// ```
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidOccurrenceKey`] for a missing item, invalid key,
     /// or cancelled anchor. Returns [`Error::CandidateLimit`] if the search cannot
-    /// finish within budget; never returns a partial answer. Propagates temporal
-    /// resolution and range errors. Elapsed recurrence seeks arithmetically; calendar
-    /// recurrence seeks to the anchor date unless a count limit requires bounded
-    /// historical expansion to count valid occurrences (excluding timezone gaps).
+    /// finish within budget; no partial answer is returned. Propagates
+    /// [`Error::AmbiguousTime`] for rejected ambiguous starts,
+    /// [`Error::NonexistentTime`] for unresolvable all-day boundaries, and
+    /// [`Error::OutOfRange`] for dates, durations, or counts outside supported ranges.
     pub fn next_after(
         &self,
         item_id: &ItemId,
@@ -110,10 +145,47 @@ impl<ItemId: Ord> Scheduler<ItemId> {
         Ok(best.map(|(_, entry)| entry))
     }
 
-    /// Query all items, sorted by UTC start, item ID, and original occurrence key.
-    /// Budgets apply across the whole query. Inspecting each schedule also costs one
-    /// candidate unit, bounding queries over schedules without matching occurrences.
-    /// Errors discard partial results. IDs are borrowed; neither IDs nor schedules are cloned.
+    /// Returns overlapping occurrences sorted by UTC start, item ID, then original key.
+    ///
+    /// Budgets apply across the whole query. Inspecting each schedule costs one
+    /// candidate unit in addition to the work described by [`Schedule::iter`].
+    /// Returned item IDs borrow from this scheduler. Errors discard partial results.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// use schedules_core::{DateRange, DateTime, Duration, Error, Placement, QueryWindow, Schedule, Tz};
+    /// const WINDOW_LENGTH: Duration = Duration::days(1);
+    /// let start = DateTime::UNIX_EPOCH;
+    /// let end = start.checked_add_signed(WINDOW_LENGTH).ok_or(Error::OutOfRange)?;
+    /// let schedule = Schedule::once(Placement::instant(start, Tz::UTC)?);
+    /// let window = QueryWindow {
+    ///     range: DateRange::new(start, end)?,
+    ///     all_day_zone: Tz::UTC,
+    ///     candidate_limit: NonZeroUsize::MIN,
+    ///     occurrence_limit: NonZeroUsize::MIN,
+    /// };
+    /// use schedules_core::Scheduler;
+    /// #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+    /// enum ItemId { Meeting }
+    /// const QUERY_WORK_UNITS: usize = 2; // One schedule inspection and one candidate.
+    /// let mut scheduler = Scheduler::new();
+    /// scheduler.insert(ItemId::Meeting, schedule);
+    /// let window = QueryWindow {
+    ///     candidate_limit: NonZeroUsize::new(QUERY_WORK_UNITS).ok_or(Error::OutOfRange)?,
+    ///     ..window
+    /// };
+    /// let results = scheduler.occurrences(window)?;
+    /// assert_eq!(results.first().map(|entry| entry.item_id), Some(&ItemId::Meeting));
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CandidateLimit`] or [`Error::OccurrenceLimit`] if the shared
+    /// query budgets are exceeded. Propagates the temporal resolution and expansion
+    /// errors described by [`Schedule::occurrences`].
     pub fn occurrences(
         &self,
         window: QueryWindow,
@@ -160,10 +232,14 @@ impl<ItemId: Ord> Scheduler<ItemId> {
     }
 }
 
-/// Occurrence paired with its owning item. Identity is item ID plus occurrence key.
+/// An occurrence paired with its owning item identifier.
+///
+/// Identity is the item identifier together with the original occurrence key.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ScheduledOccurrence<'a, ItemId> {
+    /// Borrowed identifier of the schedule that owns this occurrence.
     pub item_id: &'a ItemId,
+    /// Occurrence with its original key and effective placement.
     pub occurrence: Occurrence,
 }
 

@@ -1,3 +1,5 @@
+//! Single and repeating schedules with validated overrides and bounded queries.
+
 use std::{cmp::Ordering, collections::BTreeMap, num::NonZeroUsize};
 
 use chrono::{DateTime, Duration, NaiveDateTime, NaiveTime, Utc};
@@ -10,9 +12,13 @@ use crate::{
     ResolutionPolicy, Termination,
 };
 
+/// Converts elapsed durations to a common unit for exact recurrence seeking.
 const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
 
-/// Schedule definition. Caller owns identity and application payload.
+/// A placement with optional recurrence and validated per-occurrence overrides.
+///
+/// Application identity and payload belong to the caller; [`crate::Scheduler`]
+/// can associate schedules with application-owned identifiers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schedule {
     placement: Placement,
@@ -21,6 +27,7 @@ pub struct Schedule {
 }
 
 impl Schedule {
+    /// Creates a schedule containing one placement and no overrides.
     pub fn once(placement: Placement) -> Self {
         Self {
             placement,
@@ -29,6 +36,33 @@ impl Schedule {
         }
     }
 
+    /// Creates a repeating schedule anchored to its initial placement.
+    ///
+    /// The anchor must match all selected weekdays and times. Calendar recurrence
+    /// preserves local wall time; elapsed recurrence preserves spacing between UTC
+    /// starts. Timed intervals retain elapsed duration; all-day intervals retain
+    /// their number of calendar days.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroU32;
+    /// use schedules_core::{CalendarRule, Error, Frequency, Termination};
+    /// use schedules_core::{DateTime, Placement, Recurrence, Schedule, Tz};
+    /// let point = Placement::instant(DateTime::UNIX_EPOCH, Tz::UTC)?;
+    /// let rule = CalendarRule::new(Frequency::Daily, NonZeroU32::MIN, Termination::Forever)?;
+    /// let schedule = Schedule::repeating(point, Recurrence::calendar(rule))?;
+    /// assert!(schedule.recurrence().is_some());
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ElapsedAllDay`] for elapsed recurrence on all-day placements,
+    /// [`Error::AllDayTimes`] for all-day placements with explicit times,
+    /// [`Error::InvalidAnchor`] when the anchor fails the rule selections, or
+    /// [`Error::InvalidTermination`] when the cutoff precedes the anchor.
+    /// Propagates errors from [`Placement::bounds`] when resolving a UTC cutoff.
     pub fn repeating(placement: Placement, recurrence: Recurrence) -> Result<Self, Error> {
         if matches!(recurrence.kind, RecurrenceKind::Elapsed { .. })
             && placement.timezone().is_none()
@@ -70,17 +104,47 @@ impl Schedule {
         })
     }
 
+    /// Returns the initial placement, unaffected by occurrence overrides.
     pub const fn placement(&self) -> Placement {
         self.placement
     }
+    /// Returns the recurrence rule, or `None` for a one-off schedule.
     pub const fn recurrence(&self) -> Option<&Recurrence> {
         self.recurrence.as_ref()
     }
+    /// Returns cancellations and replacements indexed by original occurrence key.
     pub fn overrides(&self) -> &BTreeMap<OccurrenceKey, OccurrenceOverride> {
         &self.overrides
     }
 
-    /// Validate original membership before changing an occurrence. Budget includes skipped days.
+    /// Sets or replaces an override after validating original occurrence membership.
+    ///
+    /// Validation uses the unmodified recurrence, so cancelled occurrences can be
+    /// replaced again. The budget covers candidates from the anchor, including skipped
+    /// dates. On failure, existing overrides remain unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// use schedules_core::{DateTime, Error, OccurrenceKey, OccurrenceOverride, Placement, Schedule, Tz};
+    /// let start = DateTime::UNIX_EPOCH;
+    /// let mut schedule = Schedule::once(Placement::instant(start, Tz::UTC)?);
+    /// let key = OccurrenceKey::Calendar(start.naive_utc());
+    /// schedule.set_override(key, OccurrenceOverride::Cancel, NonZeroUsize::MIN)?;
+    /// assert_eq!(schedule.overrides().get(&key), Some(&OccurrenceOverride::Cancel));
+    /// assert_eq!(schedule.remove_override(key), Some(OccurrenceOverride::Cancel));
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidOccurrenceKey`] for a wrong key kind or a key outside
+    /// the original series. Returns [`Error::CandidateLimit`] if membership cannot
+    /// be established within budget. Propagates [`Error::AmbiguousTime`] for rejected
+    /// ambiguous starts and [`Error::OutOfRange`] for arithmetic beyond supported
+    /// dates or counts; temporal resolution errors from [`Placement::bounds`] may
+    /// also propagate.
     pub fn set_override(
         &mut self,
         key: OccurrenceKey,
@@ -121,6 +185,7 @@ impl Schedule {
         Err(Error::CandidateLimit)
     }
 
+    /// Removes an override and returns it, restoring the original occurrence when present.
     pub fn remove_override(&mut self, key: OccurrenceKey) -> Option<OccurrenceOverride> {
         self.overrides.remove(&key)
     }
@@ -198,9 +263,39 @@ impl Schedule {
         Ok(best.map(|(_, occurrence)| occurrence))
     }
 
-    /// Return overlapping occurrences ordered by resolved start, then original key.
-    /// Expansion starts at anchor to preserve count semantics. Budget exhaustion is an error,
-    /// never a successful truncated result. Moved occurrences can enter from outside the window.
+    /// Returns overlapping occurrences ordered by UTC start, then original key.
+    ///
+    /// Replacements are matched by their effective placement, so moved occurrences
+    /// can enter from outside the window. Expansion includes candidates before the
+    /// window and skipped dates in its budget. No partial results are returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// use schedules_core::{DateRange, DateTime, Duration, Error, Placement, QueryWindow, Schedule, Tz};
+    /// const WINDOW_LENGTH: Duration = Duration::days(1);
+    /// let start = DateTime::UNIX_EPOCH;
+    /// let end = start.checked_add_signed(WINDOW_LENGTH).ok_or(Error::OutOfRange)?;
+    /// let schedule = Schedule::once(Placement::instant(start, Tz::UTC)?);
+    /// let window = QueryWindow {
+    ///     range: DateRange::new(start, end)?,
+    ///     all_day_zone: Tz::UTC,
+    ///     candidate_limit: NonZeroUsize::MIN,
+    ///     occurrence_limit: NonZeroUsize::MIN,
+    /// };
+    /// let occurrences = schedule.occurrences(window)?;
+    /// assert_eq!(occurrences.first().map(|entry| entry.placement()), Some(schedule.placement()));
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CandidateLimit`] or [`Error::OccurrenceLimit`] when a query
+    /// budget is exceeded. Propagates [`Error::AmbiguousTime`],
+    /// [`Error::NonexistentTime`], and [`Error::OutOfRange`] from temporal resolution
+    /// or expansion. Returns [`Error::InvalidRange`] if resolved all-day boundaries
+    /// do not form a positive UTC interval.
     pub fn occurrences(&self, window: QueryWindow) -> Result<Vec<Occurrence>, Error> {
         let mut ordered = self
             .iter(window)?
@@ -222,8 +317,44 @@ impl Schedule {
         Ok(results)
     }
 
-    /// Lazy, bounded expansion. Replacements come first in original-key order, then regular
-    /// occurrences in recurrence order. Use `occurrences` for chronological sorting.
+    /// Creates a lazy, fallible iterator over placements overlapping the query window.
+    ///
+    /// Replacements come first in original-key order, followed by regular occurrences
+    /// in recurrence order. Use [`Self::occurrences`] for chronological sorting.
+    /// Each inspected override and recurrence candidate costs one candidate unit,
+    /// including cancellations, skipped dates, and candidates before the window.
+    /// Replaced originals also cost a unit when encountered during recurrence expansion.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// use schedules_core::{DateRange, DateTime, Duration, Error, Placement, QueryWindow, Schedule, Tz};
+    /// const WINDOW_LENGTH: Duration = Duration::days(1);
+    /// let start = DateTime::UNIX_EPOCH;
+    /// let end = start.checked_add_signed(WINDOW_LENGTH).ok_or(Error::OutOfRange)?;
+    /// let schedule = Schedule::once(Placement::instant(start, Tz::UTC)?);
+    /// let window = QueryWindow {
+    ///     range: DateRange::new(start, end)?,
+    ///     all_day_zone: Tz::UTC,
+    ///     candidate_limit: NonZeroUsize::MIN,
+    ///     occurrence_limit: NonZeroUsize::MIN,
+    /// };
+    /// let mut occurrences = schedule.iter(window)?;
+    /// let first = occurrences.next().transpose()?;
+    /// assert_eq!(first.map(|entry| entry.placement()), Some(schedule.placement()));
+    /// assert!(occurrences.next().is_none());
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Construction propagates errors from [`Placement::bounds`] when initializing
+    /// elapsed recurrence. During iteration, query budget exhaustion yields
+    /// [`Error::CandidateLimit`] or [`Error::OccurrenceLimit`]. Temporal resolution
+    /// and expansion can yield [`Error::AmbiguousTime`], [`Error::NonexistentTime`],
+    /// [`Error::OutOfRange`], or [`Error::InvalidRange`] for nonpositive resolved
+    /// all-day intervals. The first error terminates iteration.
     pub fn iter(&self, window: QueryWindow) -> Result<Occurrences<'_>, Error> {
         self.iter_with_budget(window, window.candidate_limit.get())
     }
@@ -245,7 +376,11 @@ impl Schedule {
     }
 }
 
-/// Fallible expansion; first error terminates the iterator. No occurrences are precomputed.
+/// Lazy occurrence expansion that terminates permanently after its first error or exhaustion.
+///
+/// Created by [`Schedule::iter`]. Successful items before an error remain visible
+/// to the caller; collecting into a `Result<Vec<_>, _>` discards partial results.
+/// See [`Schedule::iter`] for ordering and error conditions.
 pub struct Occurrences<'a> {
     cursor: Expansion<'a>,
     overrides: std::collections::btree_map::Iter<'a, OccurrenceKey, OccurrenceOverride>,

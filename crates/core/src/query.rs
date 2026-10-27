@@ -1,3 +1,5 @@
+//! UTC query windows and budgets for bounded occurrence expansion.
+
 use std::{cmp::Ordering, num::NonZeroUsize};
 
 use chrono::{DateTime, Utc};
@@ -5,12 +7,26 @@ use chrono_tz::Tz;
 
 use crate::{DateRange, Error, Occurrence, OccurrenceKey, Placement};
 
-/// Half-open UTC window. Budgets bound both scanned candidates and returned occurrences.
+/// A half-open UTC query window with explicit work and result limits.
+///
+/// Points match when contained in `range`; intervals match when overlapping it.
+/// Limits produce errors rather than silently truncating results. See
+/// [`crate::Schedule::iter`] and [`crate::Scheduler::occurrences`] for budget scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryWindow {
+    /// UTC interval to query, including its start and excluding its end.
     pub range: DateRange,
+    /// Timezone used to resolve all-day midnight boundaries.
+    ///
+    /// Timed placements retain their own timezone. Ambiguous all-day midnights
+    /// use the earlier instant; nonexistent midnights produce an error.
     pub all_day_zone: Tz,
+    /// Maximum work units for candidate expansion and override inspection.
+    ///
+    /// Skipped dates and candidates outside the window also consume budget.
+    /// Scheduler queries additionally charge for inspecting each schedule.
     pub candidate_limit: NonZeroUsize,
+    /// Maximum matching occurrences returned before reporting [`Error::OccurrenceLimit`].
     pub occurrence_limit: NonZeroUsize,
 }
 
