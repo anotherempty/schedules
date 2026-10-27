@@ -49,7 +49,7 @@ pub enum Error {
     /// Matching results exceed the occurrence limit.
     #[error("expansion exceeded occurrence limit")]
     OccurrenceLimit,
-    /// A key is invalid for the requested schedule or query, or its anchor is cancelled.
+    /// A key is invalid for the requested schedule/query, or its anchor is cancelled or excluded.
     #[error("key does not identify an occurrence in the schedule or query results")]
     InvalidOccurrenceKey,
 }

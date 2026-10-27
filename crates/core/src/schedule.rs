@@ -1,8 +1,12 @@
 //! Single and repeating schedules with validated overrides and bounded queries.
 
-use std::{cmp::Ordering, collections::BTreeMap, num::NonZeroUsize};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroUsize,
+};
 
-use chrono::{DateTime, Datelike, Duration, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
 
 use crate::query::{OccurrencePosition, SearchBudget};
@@ -15,7 +19,7 @@ use crate::{
 /// Converts elapsed durations to a common unit for exact recurrence seeking.
 const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
 
-/// A placement with optional recurrence and validated per-occurrence overrides.
+/// A placement with optional recurrence, date exclusions, and validated occurrence overrides.
 ///
 /// Application identity and payload belong to the caller; [`crate::ScheduleStore`]
 /// can associate schedules with application-owned identifiers.
@@ -24,15 +28,17 @@ pub struct Schedule {
     placement: Placement,
     recurrence: Option<Recurrence>,
     overrides: BTreeMap<OccurrenceKey, OccurrenceOverride>,
+    excluded_dates: BTreeSet<NaiveDate>,
 }
 
 impl Schedule {
-    /// Creates a schedule containing one placement and no overrides.
+    /// Creates a schedule containing one placement without overrides or date exclusions.
     pub fn once(placement: Placement) -> Self {
         Self {
             placement,
             recurrence: None,
             overrides: BTreeMap::new(),
+            excluded_dates: BTreeSet::new(),
         }
     }
 
@@ -109,6 +115,7 @@ impl Schedule {
             placement,
             recurrence: Some(recurrence),
             overrides: BTreeMap::new(),
+            excluded_dates: BTreeSet::new(),
         })
     }
 
@@ -125,9 +132,49 @@ impl Schedule {
         &self.overrides
     }
 
+    /// Excludes occurrences starting on a local date, returning whether newly inserted.
+    ///
+    /// Applies to effective placement after overrides, using its timezone for timed
+    /// occurrences and its start date for all-day occurrences. Intervals starting
+    /// earlier are not excluded merely because they extend into this date.
+    /// Exclusions do not extend recurrence count or invalidate override membership.
+    /// Moving an occurrence off an excluded date makes it visible again.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use schedules_core::{DateTime, Error, Placement, Schedule, Tz};
+    /// let start = DateTime::UNIX_EPOCH;
+    /// let mut schedule = Schedule::once(Placement::instant(start, Tz::UTC)?);
+    /// assert!(schedule.exclude_date(start.date_naive()));
+    /// assert!(schedule.include_date(start.date_naive()));
+    /// # Ok::<(), Error>(())
+    /// ```
+    pub fn exclude_date(&mut self, date: NaiveDate) -> bool {
+        self.excluded_dates.insert(date)
+    }
+
+    /// Removes a date exclusion, returning whether it existed.
+    ///
+    /// Recurrence rules and individual cancellation overrides still apply.
+    pub fn include_date(&mut self, date: NaiveDate) -> bool {
+        self.excluded_dates.remove(&date)
+    }
+
+    /// Returns explicitly excluded local start dates in ascending order.
+    pub fn excluded_dates(&self) -> &BTreeSet<NaiveDate> {
+        &self.excluded_dates
+    }
+
+    fn includes(&self, occurrence: Occurrence) -> bool {
+        !self
+            .excluded_dates
+            .contains(&occurrence.placement().local_start().date())
+    }
+
     /// Sets or replaces an override after validating original occurrence membership.
     ///
-    /// Validation uses the unmodified recurrence, so cancelled occurrences can be
+    /// Validation uses the unmodified recurrence, so cancelled or date-excluded occurrences can be
     /// replaced again. The budget covers candidates from the anchor, including skipped
     /// dates. On failure, existing overrides remain unchanged.
     ///
@@ -193,7 +240,7 @@ impl Schedule {
         Err(Error::CandidateLimit)
     }
 
-    /// Removes an override and returns it, restoring the original occurrence when present.
+    /// Removes an override, restoring original placement subject to stored date exclusions.
     pub fn remove_override(&mut self, key: OccurrenceKey) -> Option<OccurrenceOverride> {
         self.overrides.remove(&key)
     }
@@ -208,7 +255,14 @@ impl Schedule {
         if let Some(change) = self.overrides.get(&key) {
             return match change {
                 OccurrenceOverride::Cancel => Err(Error::InvalidOccurrenceKey),
-                OccurrenceOverride::Replace(placement) => Ok(Occurrence::new(key, *placement)),
+                OccurrenceOverride::Replace(placement) => {
+                    let occurrence = Occurrence::new(key, *placement);
+                    if self.includes(occurrence) {
+                        Ok(occurrence)
+                    } else {
+                        Err(Error::InvalidOccurrenceKey)
+                    }
+                }
             };
         }
         let mut cursor = Expansion::at_key(self, key)?;
@@ -219,7 +273,13 @@ impl Schedule {
                     return Err(Error::InvalidOccurrenceKey);
                 }
                 match occurrence.key().cmp(&key) {
-                    Ordering::Equal => return Ok(occurrence),
+                    Ordering::Equal => {
+                        return if self.includes(occurrence) {
+                            Ok(occurrence)
+                        } else {
+                            Err(Error::InvalidOccurrenceKey)
+                        };
+                    }
                     Ordering::Greater => return Err(Error::InvalidOccurrenceKey),
                     Ordering::Less => {}
                 }
@@ -234,6 +294,7 @@ impl Schedule {
         item_order: Ordering,
         zone: Tz,
         budget: &mut SearchBudget,
+        filter: &mut impl FnMut(&Occurrence) -> bool,
     ) -> Result<Option<Occurrence>, Error> {
         budget.charge()?;
         let mut best: Option<(OccurrencePosition, Occurrence)> = None;
@@ -242,6 +303,9 @@ impl Schedule {
             budget.charge()?;
             if let OccurrenceOverride::Replace(placement) = change {
                 let occurrence = Occurrence::new(key, placement);
+                if !self.includes(occurrence) || !filter(&occurrence) {
+                    continue;
+                }
                 let position = OccurrencePosition::new(occurrence, zone)?;
                 if position.follows(anchor, item_order)
                     && best.is_none_or(|(current, _)| position < current)
@@ -263,6 +327,8 @@ impl Schedule {
             }
             if !self.overrides.contains_key(&occurrence.key())
                 && position.follows(anchor, item_order)
+                && self.includes(occurrence)
+                && filter(&occurrence)
             {
                 best = Some((position, occurrence));
                 break;
@@ -275,7 +341,8 @@ impl Schedule {
     ///
     /// Replacements are matched by their effective placement, so moved occurrences
     /// can enter from outside the window. Expansion includes candidates before the
-    /// window and skipped dates in its budget. No partial results are returned.
+    /// window and skipped dates in its budget. Stored exclusions apply to effective
+    /// local start dates. No partial results are returned.
     ///
     /// # Examples
     ///
@@ -305,8 +372,28 @@ impl Schedule {
     /// or expansion. Returns [`Error::InvalidRange`] if resolved all-day boundaries
     /// do not form a positive UTC interval.
     pub fn occurrences(&self, window: QueryWindow) -> Result<Vec<Occurrence>, Error> {
+        self.occurrences_filtered(window, |_| true)
+    }
+
+    /// Returns sorted occurrences accepted by a custom predicate and stored exclusions.
+    ///
+    /// The predicate receives effective placement after overrides, only for occurrences
+    /// overlapping the window that pass stored exclusions. Rejected results consume
+    /// work but not result slots; recurrence count is unchanged. Predicate evaluation
+    /// follows iterator order, before final sorting. Callback execution time is not
+    /// bounded by the library's work budget.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the same expansion, timezone, and budget errors as [`Self::occurrences`].
+    /// Errors discard partial results.
+    pub fn occurrences_filtered(
+        &self,
+        window: QueryWindow,
+        filter: impl FnMut(&Occurrence) -> bool,
+    ) -> Result<Vec<Occurrence>, Error> {
         let mut ordered = self
-            .iter(window)?
+            .iter_filtered(window, filter)?
             .map(|occurrence| {
                 let occurrence = occurrence?;
                 occurrence
@@ -332,6 +419,7 @@ impl Schedule {
     /// Each inspected override and recurrence candidate costs one candidate unit,
     /// including cancellations, skipped dates/weekdays, and candidates before the window.
     /// Filtered elapsed rules inspect each cadence step, including excluded weekdays.
+    /// Stored date exclusions suppress effective local starts without extending count.
     /// Replaced originals also cost a unit when encountered during recurrence expansion.
     ///
     /// # Examples
@@ -365,14 +453,51 @@ impl Schedule {
     /// [`Error::OutOfRange`], or [`Error::InvalidRange`] for nonpositive resolved
     /// all-day intervals. The first error terminates iteration.
     pub fn iter(&self, window: QueryWindow) -> Result<Occurrences<'_>, Error> {
-        self.iter_with_budget(window, window.candidate_limit.get())
+        self.iter_filtered_with_budget(window, window.candidate_limit.get(), |_| true)
     }
 
-    pub(crate) fn iter_with_budget(
+    /// Iterates occurrences accepted by a custom predicate and stored date exclusions.
+    ///
+    /// Filtering happens before result-budget accounting. Evaluation order and
+    /// recurrence-count semantics match [`Self::occurrences_filtered`]. Predicates
+    /// may borrow application holiday data; no closure is stored in the schedule.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::num::NonZeroUsize;
+    /// # use schedules_core::{DateRange, DateTime, Duration, Error, Placement, QueryWindow, Schedule, Tz};
+    /// # const WINDOW_LENGTH: Duration = Duration::days(1);
+    /// # let start = DateTime::UNIX_EPOCH;
+    /// # let end = start.checked_add_signed(WINDOW_LENGTH).ok_or(Error::OutOfRange)?;
+    /// # let schedule = Schedule::once(Placement::instant(start, Tz::UTC)?);
+    /// # let window = QueryWindow { range: DateRange::new(start, end)?, all_day_zone: Tz::UTC,
+    /// #     candidate_limit: NonZeroUsize::MIN, occurrence_limit: NonZeroUsize::MIN };
+    /// let holidays = [start.date_naive()];
+    /// let visible = schedule.iter_filtered(window, |occurrence| {
+    ///     !holidays.contains(&occurrence.placement().local_start().date())
+    /// })?.collect::<Result<Vec<_>, _>>()?;
+    /// assert!(visible.is_empty());
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Construction and iteration propagate the errors documented by [`Self::iter`].
+    pub fn iter_filtered<F: FnMut(&Occurrence) -> bool>(
+        &self,
+        window: QueryWindow,
+        filter: F,
+    ) -> Result<Occurrences<'_, F>, Error> {
+        self.iter_filtered_with_budget(window, window.candidate_limit.get(), filter)
+    }
+
+    pub(crate) fn iter_filtered_with_budget<F: FnMut(&Occurrence) -> bool>(
         &self,
         window: QueryWindow,
         candidate_limit: usize,
-    ) -> Result<Occurrences<'_>, Error> {
+        filter: F,
+    ) -> Result<Occurrences<'_, F>, Error> {
         Ok(Occurrences {
             cursor: Expansion::new(self)?,
             overrides: self.overrides.iter(),
@@ -381,16 +506,17 @@ impl Schedule {
             work: 0,
             returned: 0,
             finished: false,
+            filter,
         })
     }
 }
 
 /// Lazy occurrence expansion that terminates permanently after its first error or exhaustion.
 ///
-/// Created by [`Schedule::iter`]. Successful items before an error remain visible
+/// Created by [`Schedule::iter`] or [`Schedule::iter_filtered`]. Successful items before an error remain visible
 /// to the caller; collecting into a `Result<Vec<_>, _>` discards partial results.
 /// See [`Schedule::iter`] for ordering and error conditions.
-pub struct Occurrences<'a> {
+pub struct Occurrences<'a, F = fn(&Occurrence) -> bool> {
     cursor: Expansion<'a>,
     overrides: std::collections::btree_map::Iter<'a, OccurrenceKey, OccurrenceOverride>,
     window: QueryWindow,
@@ -398,9 +524,10 @@ pub struct Occurrences<'a> {
     work: usize,
     returned: usize,
     finished: bool,
+    filter: F,
 }
 
-impl Iterator for Occurrences<'_> {
+impl<F: FnMut(&Occurrence) -> bool> Iterator for Occurrences<'_, F> {
     type Item = Result<Occurrence, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -421,9 +548,9 @@ impl Iterator for Occurrences<'_> {
     }
 }
 
-impl std::iter::FusedIterator for Occurrences<'_> {}
+impl<F: FnMut(&Occurrence) -> bool> std::iter::FusedIterator for Occurrences<'_, F> {}
 
-impl Occurrences<'_> {
+impl<F: FnMut(&Occurrence) -> bool> Occurrences<'_, F> {
     pub(crate) const fn work_used(&self) -> usize {
         self.work
     }
@@ -464,7 +591,10 @@ impl Occurrences<'_> {
                     }
                 }
             };
-            if self.window.overlaps(candidate.placement())? {
+            if self.cursor.schedule.includes(candidate)
+                && self.window.overlaps(candidate.placement())?
+                && (self.filter)(&candidate)
+            {
                 if self.returned >= self.window.occurrence_limit.get() {
                     return Err(Error::OccurrenceLimit);
                 }

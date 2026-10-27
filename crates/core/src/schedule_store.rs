@@ -101,11 +101,27 @@ impl<ItemId: Ord> ScheduleStore<ItemId> {
         ScheduleAnalysis::new(window, self.occurrences(window)?)
     }
 
+    /// Analyzes only occurrences accepted by a custom predicate and stored exclusions.
+    ///
+    /// Filtering and budget semantics match [`Self::occurrences_filtered`]. Excluded
+    /// occurrences consume no occupied time and produce no conflict pairs.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::occurrences_filtered`] without partial analysis.
+    pub fn analyze_filtered(
+        &self,
+        window: QueryWindow,
+        filter: impl FnMut(&ItemId, &Occurrence) -> bool,
+    ) -> Result<ScheduleAnalysis<'_, ItemId>, Error> {
+        ScheduleAnalysis::new(window, self.occurrences_filtered(window, filter)?)
+    }
+
     /// Returns the next occurrence after an item occurrence across all schedules.
     ///
     /// Orders by UTC start, item ID, then original occurrence key, as in
     /// [`Self::occurrences`]. The successor may belong to the same item or share
-    /// the anchor start time. Overrides determine effective placement; cancelled
+    /// the anchor start time. Overrides determine effective placement; cancelled or date-excluded
     /// anchors are invalid. All-day starts use `all_day_zone`.
     ///
     /// No date window is required. `None` means every schedule was exhausted without
@@ -144,7 +160,7 @@ impl<ItemId: Ord> ScheduleStore<ItemId> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidOccurrenceKey`] for a missing item, invalid key,
-    /// or cancelled anchor. Returns [`Error::CandidateLimit`] if the search cannot
+    /// or cancelled/date-excluded anchor. Returns [`Error::CandidateLimit`] if the search cannot
     /// finish within budget; no partial answer is returned. Propagates
     /// [`Error::AmbiguousTime`] for rejected ambiguous starts,
     /// [`Error::NonexistentTime`] for unresolvable all-day boundaries, and
@@ -156,15 +172,47 @@ impl<ItemId: Ord> ScheduleStore<ItemId> {
         all_day_zone: Tz,
         candidate_limit: NonZeroUsize,
     ) -> Result<Option<ScheduledOccurrence<'_, ItemId>>, Error> {
+        self.next_after_filtered(item_id, key, all_day_zone, candidate_limit, |_, _| true)
+    }
+
+    /// Finds the next accepted occurrence after an accepted anchor across all schedules.
+    ///
+    /// Uses the same ordering and shared work budget as [`Self::next_after`].
+    /// Predicates receive effective placements and should return consistent results
+    /// for the same item and occurrence. Evaluation follows search order, not sorted
+    /// output order; callback execution time is not bounded by the work budget.
+    /// Date exclusions and cancellations apply before the predicate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidOccurrenceKey`] if the anchor is missing or excluded,
+    /// including by the predicate. Propagates the errors from [`Self::next_after`].
+    /// An endless rule rejecting all successors returns [`Error::CandidateLimit`]
+    /// when work is exhausted, not `None`.
+    pub fn next_after_filtered(
+        &self,
+        item_id: &ItemId,
+        key: OccurrenceKey,
+        all_day_zone: Tz,
+        candidate_limit: NonZeroUsize,
+        mut filter: impl FnMut(&ItemId, &Occurrence) -> bool,
+    ) -> Result<Option<ScheduledOccurrence<'_, ItemId>>, Error> {
         let mut budget = SearchBudget::new(candidate_limit);
         let schedule = self.get(item_id).ok_or(Error::InvalidOccurrenceKey)?;
-        let anchor =
-            OccurrencePosition::new(schedule.occurrence_at(key, &mut budget)?, all_day_zone)?;
+        let occurrence = schedule.occurrence_at(key, &mut budget)?;
+        if !filter(item_id, &occurrence) {
+            return Err(Error::InvalidOccurrenceKey);
+        }
+        let anchor = OccurrencePosition::new(occurrence, all_day_zone)?;
         let mut best: Option<(OccurrencePosition, ScheduledOccurrence<'_, ItemId>)> = None;
         for (candidate_id, schedule) in &self.schedules {
-            if let Some(occurrence) =
-                schedule.successor(anchor, candidate_id.cmp(item_id), all_day_zone, &mut budget)?
-            {
+            if let Some(occurrence) = schedule.successor(
+                anchor,
+                candidate_id.cmp(item_id),
+                all_day_zone,
+                &mut budget,
+                &mut |occurrence| filter(candidate_id, occurrence),
+            )? {
                 let position = OccurrencePosition::new(occurrence, all_day_zone)?;
                 if best.as_ref().is_none_or(|(current, entry)| {
                     current.follows(position, entry.item_id.cmp(candidate_id))
@@ -227,6 +275,25 @@ impl<ItemId: Ord> ScheduleStore<ItemId> {
         &self,
         window: QueryWindow,
     ) -> Result<Vec<ScheduledOccurrence<'_, ItemId>>, Error> {
+        self.occurrences_filtered(window, |_, _| true)
+    }
+
+    /// Returns sorted occurrences accepted by a custom predicate and stored exclusions.
+    ///
+    /// Predicates receive borrowed item IDs and effective occurrences overlapping
+    /// the window, after overrides and stored date exclusions. Evaluation follows
+    /// item ID then iterator order, before sorting. Rejected occurrences consume
+    /// work but not shared result slots, and never extend recurrence count.
+    /// Callback execution time is not bounded by the library's work budget.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::occurrences`]; no partial results are returned.
+    pub fn occurrences_filtered(
+        &self,
+        window: QueryWindow,
+        mut filter: impl FnMut(&ItemId, &Occurrence) -> bool,
+    ) -> Result<Vec<ScheduledOccurrence<'_, ItemId>>, Error> {
         let mut work = 0;
         let mut results = Vec::new();
         for (item_id, schedule) in &self.schedules {
@@ -235,7 +302,10 @@ impl<ItemId: Ord> ScheduleStore<ItemId> {
             }
             work += 1;
             let remaining = window.candidate_limit.get() - work;
-            let mut occurrences = schedule.iter_with_budget(window, remaining)?;
+            let mut occurrences =
+                schedule.iter_filtered_with_budget(window, remaining, |occurrence| {
+                    filter(item_id, occurrence)
+                })?;
             for occurrence in occurrences.by_ref() {
                 let occurrence = occurrence?;
                 if results.len() >= window.occurrence_limit.get() {

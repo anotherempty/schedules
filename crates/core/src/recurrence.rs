@@ -116,8 +116,9 @@ pub enum Termination {
     Forever,
     /// Limits valid original occurrences, including the initial placement.
     ///
-    /// Skipped weekdays, timezone gaps, and invalid dates do not count. Cancelled or replaced
-    /// occurrences still count; overrides do not extend the series.
+    /// Rule-filtered weekdays, timezone gaps, and invalid dates do not count.
+    /// Cancelled, replaced, date-excluded, or predicate-rejected occurrences still
+    /// count; these exceptions do not extend the original series.
     Count(NonZeroU32),
     /// Inclusive local cutoff for calendar recurrence only.
     Until(NaiveDateTime),

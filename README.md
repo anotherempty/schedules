@@ -29,7 +29,7 @@ Calendar and weekday-filtered elapsed count limits use bounded historical expans
 because skipped dates, timezone gaps, and excluded weekdays do not count as occurrences.
 
 1. `Placement`: timezone-aware point, timed interval, or date-only all-day range.
-2. `Schedule`: placement plus optional recurrence and per-occurrence overrides.
+2. `Schedule`: placement plus optional recurrence, date exclusions, and per-occurrence overrides.
 3. `CalendarRule`: Gregorian daily, weekly, monthly, or yearly frequency, positive
    interval, optional weekday set, arbitrary selected local times, and termination.
 4. `Recurrence::elapsed`: fixed positive UTC cadence with optional local weekday filtering.
@@ -39,6 +39,37 @@ because skipped dates, timezone gaps, and excluded weekdays do not count as occu
    regular occurrences in recurrence order. First error terminates iteration.
 7. `Schedule::occurrences`: collect and sort overlapping occurrences by UTC start,
    then original occurrence key. Errors discard partial results.
+
+## Holidays and custom exclusions
+
+`Schedule::exclude_date(NaiveDate)` suppresses every occurrence starting on that
+local date. `include_date` removes the exclusion; `excluded_dates` borrows the
+stored set. Dates use the effective placement's timezone, or the start date for
+all-day placements, and apply after overrides. An overnight interval starting
+before an excluded date remains visible. Moving an occurrence off an excluded
+date makes it visible again; moving one onto the date hides it.
+
+Custom predicates may borrow application holiday calendars or business rules:
+
+1. `Schedule::iter_filtered(window, predicate)` and
+   `occurrences_filtered(window, predicate)` accept `FnMut(&Occurrence) -> bool`.
+2. `ScheduleStore::occurrences_filtered(window, predicate)` and
+   `analyze_filtered(window, predicate)` accept `FnMut(&ItemId, &Occurrence) -> bool`.
+3. `ScheduleStore::next_after_filtered(item_id, key, zone, budget, predicate)`
+   uses the same item-aware predicate and requires an accepted anchor.
+
+Return `true` to retain an occurrence. Window queries invoke predicates only
+after stored exclusions and overlap checks, before result-limit accounting and
+sorting. Rejected occurrences consume work but no result slots. Date exclusions
+and predicates do not extend recurrence count, matching cancellation semantics;
+weekday selection inside the recurrence rule still counts only matching starts.
+Original membership remains valid for setting overrides on date-excluded entries.
+
+Custom predicates belong to each query and are not stored in `Schedule`. Pass
+the same predicate to analysis and successor queries for consistent results.
+Use deterministic predicates: traversal order differs between query methods.
+Callback execution time is outside the library's work budget. An endless series
+whose successors are all rejected ends with `CandidateLimit`, not `None`.
 
 ## Availability and conflicts
 
@@ -122,8 +153,8 @@ schedules. Elapsed recurrence remains independent of calendar time selection.
 
 Termination supports forever, count, inclusive local cutoff for calendar rules,
 or inclusive UTC cutoff for elapsed rules. Initial placement must match rule and
-not exceed cutoff. Count includes original occurrence and cancelled occurrences;
-moving or cancelling instances does not regenerate the series.
+not exceed cutoff. Count includes original, cancelled, date-excluded, and
+predicate-rejected occurrences; exceptions do not regenerate the series.
 
 Overrides retain original `OccurrenceKey`, scoped to their schedule. Replacement
 can enter a query window even when original occurrence lies outside it. Membership

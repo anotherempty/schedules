@@ -26,7 +26,9 @@ pub struct QueryWindow {
     /// Skipped dates and candidates outside the window also consume budget.
     /// Schedule store queries additionally charge for inspecting each schedule.
     pub candidate_limit: NonZeroUsize,
-    /// Maximum matching occurrences returned before reporting [`Error::OccurrenceLimit`].
+    /// Maximum accepted occurrences returned before reporting [`Error::OccurrenceLimit`].
+    ///
+    /// Stored date exclusions and custom query predicates run before this limit.
     pub occurrence_limit: NonZeroUsize,
 }
 
