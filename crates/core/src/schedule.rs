@@ -125,21 +125,24 @@ impl Schedule {
     /// Expansion starts at anchor to preserve count semantics. Budget exhaustion is an error,
     /// never a successful truncated result. Moved occurrences can enter from outside the window.
     pub fn occurrences(&self, window: QueryWindow) -> Result<Vec<Occurrence>, Error> {
-        let results = self.iter(window)?.collect::<Result<Vec<_>, _>>()?;
-        let mut ordered = results
-            .into_iter()
+        let mut ordered = self
+            .iter(window)?
             .map(|occurrence| {
+                let occurrence = occurrence?;
                 occurrence
                     .placement()
                     .bounds(window.all_day_zone)
                     .map(|(start, _)| (start, occurrence))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        ordered.sort_by_key(|(start, occurrence)| (*start, occurrence.key()));
-        Ok(ordered
+        // Each original key appears once, including replaced occurrences.
+        ordered.sort_unstable_by_key(|(start, occurrence)| (*start, occurrence.key()));
+        let mut results: Vec<_> = ordered
             .into_iter()
             .map(|(_, occurrence)| occurrence)
-            .collect())
+            .collect();
+        results.shrink_to_fit();
+        Ok(results)
     }
 
     /// Lazy, bounded expansion. Replacements come first in original-key order, then regular

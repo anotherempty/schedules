@@ -86,16 +86,20 @@ impl<ItemId: Ord> Scheduler<ItemId> {
             }
             work += occurrences.work_used();
         }
-        results.sort_by(|(left_start, left), (right_start, right)| {
+        // Item ID and occurrence key uniquely break ties; stability is unnecessary.
+        results.sort_unstable_by(|(left_start, left), (right_start, right)| {
             left_start
                 .cmp(right_start)
                 .then_with(|| left.item_id.cmp(right.item_id))
                 .then_with(|| left.occurrence.key().cmp(&right.occurrence.key()))
         });
-        Ok(results
+        let mut results: Vec<_> = results
             .into_iter()
             .map(|(_, occurrence)| occurrence)
-            .collect())
+            .collect();
+        // Removing cached sort keys can leave substantial unused capacity.
+        results.shrink_to_fit();
+        Ok(results)
     }
 }
 

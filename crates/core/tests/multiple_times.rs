@@ -315,3 +315,32 @@ fn time_set_insertion_is_unique_sorted_and_preserves_subsecond_precision() {
     assert!(times.contains(fractional));
     assert_eq!(times.iter().collect::<Vec<_>>(), [morning, fractional]);
 }
+
+#[test]
+fn time_set_order_and_equality_ignore_insertion_history_and_clones_are_independent() {
+    let ordered = ["00:00:00", "09:00:00", "12:00:00", "17:00:00", "23:59:59"].map(Fixture::time);
+    let mut ascending = TimeSet::default();
+    let mut descending = TimeSet::default();
+    assert!(ascending.is_empty());
+    for time in ordered {
+        assert!(ascending.insert(time));
+    }
+    for time in ordered.into_iter().rev() {
+        assert!(descending.insert(time));
+    }
+    assert_eq!(ascending, descending);
+    assert_eq!(ascending.iter().collect::<Vec<_>>(), ordered);
+    assert_eq!(
+        ascending.iter().rev().collect::<Vec<_>>(),
+        ordered.into_iter().rev().collect::<Vec<_>>()
+    );
+    for time in ordered {
+        assert!(!descending.insert(time));
+        assert!(descending.contains(time));
+    }
+    let between = Fixture::time("10:30:00");
+    let mut independent = ascending.clone();
+    assert!(independent.insert(between));
+    assert!(!ascending.contains(between));
+    assert_ne!(ascending, independent);
+}

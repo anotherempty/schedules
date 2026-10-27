@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, num::NonZeroU32, ops::Bound};
+use std::num::NonZeroU32;
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc, Weekday};
 
@@ -11,16 +11,23 @@ const WEEKDAY_BIT: u8 = 1;
 /// Sorted, unique local times. Empty set inherits the initial placement's time.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TimeSet {
-    times: BTreeSet<NaiveTime>,
+    times: Vec<NaiveTime>,
 }
 
 impl TimeSet {
     pub fn insert(&mut self, time: NaiveTime) -> bool {
-        self.times.insert(time)
+        match self.times.binary_search(&time) {
+            Ok(_) => false,
+            Err(position) => {
+                // Binary search returns an insertion position within 0..=len.
+                self.times.insert(position, time);
+                true
+            }
+        }
     }
 
     pub fn contains(&self, time: NaiveTime) -> bool {
-        self.times.contains(&time)
+        self.times.binary_search(&time).is_ok()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -36,10 +43,8 @@ impl TimeSet {
     }
 
     pub(crate) fn after(&self, time: NaiveTime) -> Option<NaiveTime> {
-        self.times
-            .range((Bound::Excluded(time), Bound::Unbounded))
-            .next()
-            .copied()
+        let position = self.times.partition_point(|candidate| *candidate <= time);
+        self.times.get(position).copied()
     }
 }
 
