@@ -320,7 +320,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "scheduler-core"
+name = "schedules-core"
 version = "0.1.0"
 dependencies = [
  "chrono",

@@ -1,7 +1,7 @@
-# Scheduler
+# Schedules
 
 Rust library for calendar-aware placement and recurrence. Workspace library:
-`crates/core` (`scheduler-core`). No runtime or persistence required.
+`crates/core` (`schedules-core`). No runtime or persistence required.
 
 `Scheduler<ItemId>` owns an in-memory map of item IDs to schedules. `insert` adds
 or replaces a complete schedule and returns the previous value. `get`, `get_mut`,
@@ -92,7 +92,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ## Benchmark
 
 ```sh
-cargo bench -p scheduler-core --bench scheduler
+cargo bench -p schedules-core --bench scheduler
 ```
 
 Criterion measures complete sorted scheduler queries with 10, 100, and 1,000 items.

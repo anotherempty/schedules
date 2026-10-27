@@ -1,5 +1,5 @@
 [package]
-name = "scheduler-core"
+name = "schedules-core"
 version.workspace = true
 edition.workspace = true
 

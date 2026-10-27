@@ -1,6 +1,6 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 
-use scheduler_core::{
+use schedules_core::{
     AmbiguityPolicy, CalendarRule, DateRange, DateTime, Duration, Error, Frequency, NaiveDate,
     NaiveDateTime, Occurrence, OccurrenceKey, OccurrenceOverride, Placement, QueryWindow,
     Recurrence, ResolutionPolicy, Schedule, Termination, Tz, Utc, Weekday,

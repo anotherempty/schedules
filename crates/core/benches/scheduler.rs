@@ -5,7 +5,7 @@ use std::{
 };
 
 use criterion::{BenchmarkId, Criterion, Throughput};
-use scheduler_core::{
+use schedules_core::{
     CalendarRule, DateRange, DateTime, Error, Frequency, NaiveDateTime, NaiveTime, Placement,
     QueryWindow, Recurrence, ResolutionPolicy, Schedule, Scheduler, Termination, Utc, Weekday,
 };

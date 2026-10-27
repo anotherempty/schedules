@@ -5,7 +5,7 @@
 //!
 //! ```
 //! use std::num::NonZeroU32;
-//! use scheduler_core::{CalendarRule, Error, Frequency, NaiveDateTime, Placement,
+//! use schedules_core::{CalendarRule, Error, Frequency, NaiveDateTime, Placement,
 //!     Recurrence, ResolutionPolicy, Schedule, Termination, Tz};
 //!
 //! fn daily_at(start: NaiveDateTime, zone: Tz) -> Result<Schedule, Error> {
