@@ -17,6 +17,7 @@ const EXACT_DAY_HOURS: i64 = 24;
 const MEETING_HOURS: i64 = 2;
 const ONE_HOUR_SECONDS: i64 = 3_600;
 const ONE_OCCURRENCE: u32 = 1;
+const ALTERNATING_PERIOD_INTERVAL: u32 = 2;
 
 #[test]
 fn query_stops_before_future_ambiguity() {
@@ -642,4 +643,217 @@ fn cancellation_does_not_extend_count_and_query_does_not_restart_count() {
         ),
         [Fixture::instant("2026-01-02T09:00:00Z")]
     );
+}
+
+#[test]
+fn moved_and_regular_occurrences_sort_by_start_then_original_key() {
+    let mut schedule = Schedule::repeating(
+        Fixture::point("2026-01-01 09:00:00", chrono_tz::UTC),
+        Recurrence::calendar(Fixture::rule(Frequency::Daily, THREE_OCCURRENCES)),
+    )
+    .unwrap();
+    let first = OccurrenceKey::Calendar(Fixture::local("2026-01-01 09:00:00"));
+    let second = OccurrenceKey::Calendar(Fixture::local("2026-01-02 09:00:00"));
+    let third = OccurrenceKey::Calendar(Fixture::local("2026-01-03 09:00:00"));
+    let window = Fixture::window("2026-01-01T00:00:00Z", "2026-01-05T00:00:00Z");
+    schedule
+        .set_override(
+            first,
+            OccurrenceOverride::Replace(Fixture::point("2026-01-04 09:00:00", chrono_tz::UTC)),
+            Fixture::budget(),
+        )
+        .unwrap();
+    let items = schedule.occurrences(window).unwrap();
+    assert_eq!(
+        items.iter().map(|item| item.key()).collect::<Vec<_>>(),
+        [second, third, first]
+    );
+    assert_eq!(
+        Fixture::starts(&items),
+        [
+            "2026-01-02T09:00:00Z",
+            "2026-01-03T09:00:00Z",
+            "2026-01-04T09:00:00Z"
+        ]
+        .map(Fixture::instant)
+    );
+
+    assert_eq!(
+        schedule.remove_override(first),
+        Some(OccurrenceOverride::Replace(Fixture::point(
+            "2026-01-04 09:00:00",
+            chrono_tz::UTC
+        )))
+    );
+    // Replacement is yielded before regular occurrences, but its key sorts last.
+    schedule
+        .set_override(
+            third,
+            OccurrenceOverride::Replace(Fixture::point("2026-01-01 09:00:00", chrono_tz::UTC)),
+            Fixture::budget(),
+        )
+        .unwrap();
+    let items = schedule.occurrences(window).unwrap();
+    assert_eq!(
+        items.iter().map(|item| item.key()).collect::<Vec<_>>(),
+        [first, third, second]
+    );
+    assert_eq!(
+        Fixture::starts(&items),
+        [
+            "2026-01-01T09:00:00Z",
+            "2026-01-01T09:00:00Z",
+            "2026-01-02T09:00:00Z"
+        ]
+        .map(Fixture::instant)
+    );
+}
+
+#[test]
+fn elapsed_fold_occurrences_have_distinct_keys_and_independent_cancellation() {
+    let schedule = Schedule::repeating(
+        Fixture::point("2026-10-25 01:30:00", chrono_tz::Europe::London),
+        Recurrence::elapsed(
+            Duration::seconds(ONE_HOUR_SECONDS),
+            Termination::Count(NonZeroU32::new(TWO_OCCURRENCES).unwrap()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let window = Fixture::window("2026-10-25T00:00:00Z", "2026-10-26T00:00:00Z");
+    let early = Fixture::instant("2026-10-25T00:30:00Z");
+    let late = Fixture::instant("2026-10-25T01:30:00Z");
+    let items = schedule.occurrences(window).unwrap();
+    assert_eq!(
+        items.iter().map(|item| item.key()).collect::<Vec<_>>(),
+        [OccurrenceKey::Elapsed(early), OccurrenceKey::Elapsed(late)]
+    );
+    for (cancelled, retained) in [(early, late), (late, early)] {
+        let mut changed = schedule.clone();
+        changed
+            .set_override(
+                OccurrenceKey::Elapsed(cancelled),
+                OccurrenceOverride::Cancel,
+                Fixture::budget(),
+            )
+            .unwrap();
+        let items = changed.occurrences(window).unwrap();
+        assert_eq!(
+            items.iter().map(|item| item.key()).collect::<Vec<_>>(),
+            [OccurrenceKey::Elapsed(retained)],
+            "cancelled: {cancelled}"
+        );
+        assert_eq!(
+            Fixture::starts(&items),
+            [retained],
+            "cancelled: {cancelled}"
+        );
+    }
+}
+
+#[test]
+fn nonweekly_intervals_skip_periods_across_year_boundaries() {
+    let cases = [
+        (
+            Frequency::Daily,
+            "2025-12-31 09:00:00",
+            "2026-01-06T00:00:00Z",
+            [
+                "2025-12-31T09:00:00Z",
+                "2026-01-02T09:00:00Z",
+                "2026-01-04T09:00:00Z",
+            ],
+        ),
+        (
+            Frequency::Monthly,
+            "2025-11-30 09:00:00",
+            "2026-04-01T00:00:00Z",
+            [
+                "2025-11-30T09:00:00Z",
+                "2026-01-30T09:00:00Z",
+                "2026-03-30T09:00:00Z",
+            ],
+        ),
+        (
+            Frequency::Yearly,
+            "2024-06-15 09:00:00",
+            "2029-01-01T00:00:00Z",
+            [
+                "2024-06-15T09:00:00Z",
+                "2026-06-15T09:00:00Z",
+                "2028-06-15T09:00:00Z",
+            ],
+        ),
+    ];
+    for (frequency, anchor, end, expected) in cases {
+        let rule = CalendarRule::new(
+            frequency,
+            NonZeroU32::new(ALTERNATING_PERIOD_INTERVAL).unwrap(),
+            Termination::Count(NonZeroU32::new(THREE_OCCURRENCES).unwrap()),
+        )
+        .unwrap();
+        let schedule = Schedule::repeating(
+            Fixture::point(anchor, chrono_tz::UTC),
+            Recurrence::calendar(rule),
+        )
+        .unwrap();
+        let window = QueryWindow {
+            range: DateRange::new(Fixture::local(anchor).and_utc(), Fixture::instant(end)).unwrap(),
+            ..Fixture::window("2024-01-01T00:00:00Z", end)
+        };
+        assert_eq!(
+            Fixture::starts(&schedule.occurrences(window).unwrap()),
+            expected.map(Fixture::instant),
+            "frequency: {frequency:?}"
+        );
+    }
+}
+
+#[test]
+fn constructors_reject_invalid_ranges_durations_and_pre_anchor_cutoffs() {
+    let anchor = Fixture::local("2026-01-02 09:00:00");
+    let before = Fixture::local("2026-01-01 09:00:00");
+    for end in [anchor, before] {
+        assert_eq!(
+            DateRange::new(anchor.and_utc(), end.and_utc()),
+            Err(Error::InvalidRange),
+            "end: {end}"
+        );
+    }
+    for duration in [Duration::zero(), -Duration::hours(MEETING_HOURS)] {
+        assert_eq!(
+            Placement::timed(
+                anchor,
+                chrono_tz::UTC,
+                duration,
+                ResolutionPolicy::default()
+            ),
+            Err(Error::InvalidDuration),
+            "duration: {duration}"
+        );
+    }
+    let placement = Placement::point(anchor, chrono_tz::UTC, ResolutionPolicy::default()).unwrap();
+    let recurrences = [
+        Recurrence::calendar(
+            CalendarRule::new(
+                Frequency::Daily,
+                NonZeroU32::MIN,
+                Termination::Until(before),
+            )
+            .unwrap(),
+        ),
+        Recurrence::elapsed(
+            Duration::hours(EXACT_DAY_HOURS),
+            Termination::UntilInstant(before.and_utc()),
+        )
+        .unwrap(),
+    ];
+    for recurrence in recurrences {
+        let termination = recurrence.termination();
+        assert_eq!(
+            Schedule::repeating(placement, recurrence),
+            Err(Error::InvalidTermination),
+            "termination: {termination:?}"
+        );
+    }
 }
