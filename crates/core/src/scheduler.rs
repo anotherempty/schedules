@@ -6,7 +6,7 @@ use chrono_tz::Tz;
 
 use crate::query::{OccurrencePosition, SearchBudget};
 
-use crate::{Error, Occurrence, OccurrenceKey, QueryWindow, Schedule};
+use crate::{Error, Occurrence, OccurrenceKey, QueryWindow, Schedule, ScheduleAnalysis};
 
 /// In-memory schedules keyed by application-owned item identifiers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +63,42 @@ impl<ItemId: Ord> Scheduler<ItemId> {
         &self,
     ) -> impl DoubleEndedIterator<Item = (&ItemId, &Schedule)> + ExactSizeIterator {
         self.schedules.iter()
+    }
+
+    /// Analyzes occupied time, free gaps, and conflicts within a query window.
+    ///
+    /// Expands once with the same shared budgets as [`Self::occurrences`].
+    /// Intervals are clipped to the window; points consume no time and do not
+    /// conflict. All-day placements use the window's viewing timezone.
+    /// Analysis borrows item IDs without requiring `Clone` or owning payloads.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// use schedules_core::{DateRange, DateTime, Duration, Error, QueryWindow, Scheduler, Tz};
+    /// const WINDOW_LENGTH: Duration = Duration::hours(8);
+    /// let start = DateTime::UNIX_EPOCH;
+    /// let end = start.checked_add_signed(WINDOW_LENGTH).ok_or(Error::OutOfRange)?;
+    /// let window = QueryWindow {
+    ///     range: DateRange::new(start, end)?,
+    ///     all_day_zone: Tz::UTC,
+    ///     candidate_limit: NonZeroUsize::MIN,
+    ///     occurrence_limit: NonZeroUsize::MIN,
+    /// };
+    /// let scheduler: Scheduler<u64> = Scheduler::new();
+    /// let analysis = scheduler.analyze(window)?;
+    /// assert_eq!(analysis.longest_gap(), Some(window.range));
+    /// assert!(analysis.is_slot_available(window.range));
+    /// # Ok::<(), Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Propagates expansion, budget, and timezone errors from [`Self::occurrences`].
+    /// No partial analysis is returned.
+    pub fn analyze(&self, window: QueryWindow) -> Result<ScheduleAnalysis<'_, ItemId>, Error> {
+        ScheduleAnalysis::new(window, self.occurrences(window)?)
     }
 
     /// Returns the next occurrence after an item occurrence across all schedules.

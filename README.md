@@ -40,6 +40,35 @@ count as occurrences.
 7. `Schedule::occurrences`: collect and sort overlapping occurrences by UTC start,
    then original occurrence key. Errors discard partial results.
 
+## Availability and conflicts
+
+`Scheduler::analyze(window)` expands occurrences once and returns a
+`ScheduleAnalysis` borrowing item identifiers. Query work and occurrence budgets
+retain their existing scope; any expansion error discards the analysis.
+
+1. `gaps()` returns maximal free UTC ranges, including window edges.
+2. `available_slots(minimum)` yields free gaps fitting a positive elapsed duration.
+3. `longest_gap()` returns the longest gap, preferring the earliest on ties.
+4. `is_slot_available(range)` requires the entire slot to lie inside a free gap.
+5. `overlaps()` lazily yields each conflicting occurrence pair once, including
+   occurrences of the same item, with original identities and clipped intersection.
+6. `density()` reports occupied and free elapsed durations and occupancy ratio
+   (zero to one). Overlapping time counts once.
+7. `suggest_alternatives(preferred_start, duration)` returns one fitting appointment
+   per free gap, ranked by distance from the preferred UTC start, then earlier start.
+   Starts are clamped to each gap's valid start range; no time grid is imposed.
+
+Analysis clips intervals to the window and resolves all-day boundaries in its
+viewing timezone. Touching intervals do not conflict. Points consume no time and
+do not block slots. Cancelled occurrences are absent; moved occurrences use their
+replacement placement. Suggestions keep existing events occupied, including an
+event being rescheduled, and cannot extend outside the analyzed window.
+
+Analysis stores O(n) data after expansion and sorting. Conflict pair enumeration
+can take O(n²) time; query budgets bound expansion, not pair enumeration. Use
+`overlaps().take(limit)` to limit returned pairs without allocating all conflicts.
+Suggestions use O(g log g) time and O(g) storage for g fitting gaps.
+
 ## Time semantics
 
 Calendar recurrence preserves local wall time and named IANA timezone. Elapsed
@@ -124,4 +153,24 @@ successor per query. Run only this group with:
 
 ```sh
 cargo bench -p schedules-core --bench scheduler -- scheduler_next_after
+```
+
+Analysis benchmarks use one-hour timed events with the same item counts,
+recurrence rules, timezones, and DST-crossing window:
+
+1. `scheduler_analysis` measures expansion, sorting, analysis construction, and
+   result destruction for recent and year-old anchors.
+2. `scheduler_analysis_overlaps` consumes every conflict pair from a precomputed
+   analysis; throughput counts pairs. Dense same-zone events expose quadratic
+   output growth without allocating a conflict list.
+3. `scheduler_analysis_alternatives` generates and drops ranked one-hour
+   appointments from a precomputed analysis. Gap count remains fixed as item
+   count grows, isolating suggestion cost from occurrence expansion.
+
+Setup validates occurrence counts, 64 occupied hours, 49 free gaps, independently
+calculated conflict counts, and suggested appointment validity outside timing.
+Run all analysis groups with:
+
+```sh
+cargo bench -p schedules-core --bench scheduler -- scheduler_analysis
 ```

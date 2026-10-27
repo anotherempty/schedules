@@ -33,6 +33,7 @@
 //! # Ok::<(), Error>(())
 //! ```
 
+mod analysis;
 mod date_range;
 mod error;
 mod occurrence;
@@ -42,6 +43,8 @@ mod schedule;
 mod scheduler;
 mod temporal;
 
+#[doc(inline)]
+pub use analysis::{Overlap, ScheduleAnalysis, ScheduleDensity};
 #[doc(inline)]
 pub use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc, Weekday};
 #[doc(inline)]

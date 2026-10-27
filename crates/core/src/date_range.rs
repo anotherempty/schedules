@@ -1,6 +1,6 @@
 //! Nonempty UTC ranges for containment and overlap queries.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 use crate::Error;
 
@@ -55,5 +55,21 @@ impl DateRange {
     /// Tests whether ranges share time; touching endpoints do not overlap.
     pub fn overlaps(self, other: Self) -> bool {
         self.start < other.end && other.start < self.end
+    }
+
+    /// Returns elapsed time between the range boundaries.
+    pub fn duration(self) -> Duration {
+        self.end - self.start
+    }
+
+    /// Returns shared time, or `None` for disjoint or touching ranges.
+    pub fn intersection(self, other: Self) -> Option<Self> {
+        let start = self.start.max(other.start);
+        let end = self.end.min(other.end);
+        if start < end {
+            Some(Self { start, end })
+        } else {
+            None
+        }
     }
 }
