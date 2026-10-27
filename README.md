@@ -6,8 +6,10 @@ No runtime or persistence required.
 1. `crates/calendar-views` (`calendar-views`): standalone day/week grouping for
    arbitrary owned or borrowed payloads paired with UTC points or intervals.
 2. `crates/core` (`schedules-core`): schedule definitions and occurrence queries;
-   optionally depends on `calendar-views` and adapts its results. Dependency runs only from
-   core to calendar views.
+   optionally integrates `calendar-views` and `ics-document`.
+3. `crates/ics-document` (`ics-document`): independent ICS document parsing,
+   serialization, wire-data access, and source locations. Neither standalone
+   crate depends on core.
 
 `ScheduleStore<ItemId>` owns an in-memory map of item IDs to schedules. `insert` adds
 or replaces a complete schedule and returns the previous value. `get`, `get_mut`,
@@ -214,7 +216,63 @@ Lazy consumers must handle errors encountered after earlier successful items.
 
 Current API implements a recurrence subset, not full RFC 5545. Arbitrary month/day
 filters, additional recurrence dates, floating local times, calendar-duration
-event lengths, and iCalendar/Google adapters are not implemented.
+event lengths, and Google adapters are not implemented.
+
+## Optional ICS interoperability
+
+Use `ics-document` directly for scheduling-agnostic document operations.
+Enable `schedules-core`'s `ics` feature for the optional integration: re-exported
+`IcsDocument`, `IcsEvent`, `IcsError`, and the `IcsScheduleExt` conversion trait.
+Import `IcsScheduleExt` to use `to_schedules` and `from_schedules`.
+Disabled by default; `ics-document` and its parser are absent from core's default
+dependency graph. The standalone crate depends only on `ical` and `thiserror`.
+`IcsDocument::deserialize(text)` parses one VCALENDAR into structured data.
+`document.serialize()` emits a complete `.ics` document. Neither operation
+requires schedule-compatible timing. `document.to_schedules(candidate_limit)`
+performs that conversion explicitly; `IcsDocument::from_schedules(&events, dtstamp)`
+builds a document from schedules.
+UID is caller-supplied textual identity; no event metadata model is introduced.
+Core conversion failures expose typed `IcsInvalid`, `IcsUnsupported`, and
+`IcsField` context. Wire parsing failures use `ics_document::Error` and `Invalid`;
+the adapter preserves them in `IcsError::Wire` when needed.
+Missing fields, duplicates, malformed values, and unsupported constructs are
+distinct. Duplicate UIDs, orphan exceptions, and duplicate occurrence exceptions
+have separate errors. Numeric, date, syntax, and schedule errors retain their
+underlying error sources where available.
+Import errors expose `location()` with one-based physical start/end lines,
+including folded continuations. `kind()` borrows the underlying typed failure;
+`source()` preserves the location layer and original cause chain. Missing fields
+point to their enclosing component; incomplete documents point to the final
+physical line. Standalone conversions and export failures have no source location.
+Documents retain metadata properties, parameters, and nested alarms without an
+application-specific metadata model. Serialization normalizes property order,
+parameter quoting, folding, and line endings; it is not byte-preserving.
+Schedule conversion ignores metadata; constructing a document from schedules
+does not invent metadata. Source locations remain tied to the original input.
+
+Supported [RFC 5545](https://www.rfc-editor.org/rfc/rfc5545) subset:
+
+1. UTC `DTSTART`/`DTEND` and date-only all-day events, with exclusive end dates.
+   An omitted all-day end means one day; an omitted timed end means a point.
+2. Daily, weekly, monthly, and yearly recurrence, `INTERVAL`, nonordinal `BYDAY`,
+   `COUNT`, and inclusive `UNTIL`. Week starts Monday.
+3. `EXDATE` cancellations and detached `RECURRENCE-ID` replacements/cancellations,
+   including exceptions appearing before their master. EXDATE takes precedence.
+4. Escaped textual UIDs, CRLF output, and UTF-8-safe folding at 75 octets.
+
+Unsupported timing returns a conversion error instead of being approximated: floating times,
+TZID input, zoned recurring export, elapsed recurrence, explicit selected
+times, other RRULE parts, RDATE, DURATION, date-wide exclusions, RANGE exceptions,
+and METHOD scheduling messages. Zoned one-off export preserves its UTC instant;
+its original timezone label is not retained. Subsecond/leap-second precision and
+years outside four digits are rejected. Duplicate masters and orphan exceptions
+are conversion errors. Schedule results are ordered by UID. Document parsing
+supports VCALENDAR, VEVENT, and nested VALARM; other components, including
+VTIMEZONE, are rejected during deserialization.
+
+Exception validation uses the caller's candidate budget per exception. Callers
+must bound input size and event count separately. Export takes an explicit
+DTSTAMP and never reads the system clock.
 
 ## Validation
 
@@ -226,6 +284,20 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## Benchmark
+
+ICS deserialization benchmarks belong to the standalone crate:
+
+```sh
+cargo bench -p ics-document --bench ics_deserialize
+```
+
+`ics_deserialize` measures documents with 10, 100, and 1,000 events in two forms:
+basic UTC events, and events with recurrence properties, UTF-8 folded descriptions,
+quoted attendee parameters, and nested alarms. Throughput reports input bytes.
+Fixture construction, event-count checks, metadata checks, and serialization
+stability checks run outside timing. Measurements include deserialization,
+source-location tracking, allocation, and document destruction; schedule conversion
+and serialization are excluded. Criterion stores results under `target/criterion`.
 
 ```sh
 cargo bench -p schedules-core --bench schedule_store

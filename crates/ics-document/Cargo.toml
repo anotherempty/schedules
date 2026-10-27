@@ -1,0 +1,15 @@
+[package]
+name = "ics-document"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ical.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "ics_deserialize"
+harness = false

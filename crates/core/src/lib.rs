@@ -36,6 +36,8 @@
 mod analysis;
 mod date_range;
 mod error;
+#[cfg(feature = "ics")]
+mod ics;
 mod occurrence;
 mod query;
 mod recurrence;
@@ -57,6 +59,12 @@ pub use chrono_tz::Tz;
 pub use date_range::DateRange;
 #[doc(inline)]
 pub use error::Error;
+#[cfg(feature = "ics")]
+pub use ics::error::{IcsError, IcsField, IcsInvalid, IcsUnsupported};
+#[cfg(feature = "ics")]
+pub use ics::{IcsEvent, IcsScheduleExt};
+#[cfg(feature = "ics")]
+pub use ics_document::{IcsDocument, IcsLocation};
 #[doc(inline)]
 pub use occurrence::{Occurrence, OccurrenceKey, OccurrenceOverride};
 #[doc(inline)]

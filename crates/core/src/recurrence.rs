@@ -108,6 +108,35 @@ pub enum Frequency {
     Yearly,
 }
 
+#[cfg(feature = "ics")]
+impl Frequency {
+    /// Parses an RFC 5545 frequency name, ignoring ASCII case.
+    ///
+    /// # Errors
+    /// Returns [`crate::IcsError::Unsupported`] for unsupported frequency names.
+    pub fn from_ics(value: &str) -> Result<Self, crate::IcsError> {
+        match value.to_ascii_uppercase().as_str() {
+            "DAILY" => Ok(Self::Daily),
+            "WEEKLY" => Ok(Self::Weekly),
+            "MONTHLY" => Ok(Self::Monthly),
+            "YEARLY" => Ok(Self::Yearly),
+            _ => Err(crate::IcsError::Unsupported(
+                crate::IcsUnsupported::Frequency,
+            )),
+        }
+    }
+
+    /// Returns the RFC 5545 frequency name.
+    pub const fn as_ics(self) -> &'static str {
+        match self {
+            Self::Daily => "DAILY",
+            Self::Weekly => "WEEKLY",
+            Self::Monthly => "MONTHLY",
+            Self::Yearly => "YEARLY",
+        }
+    }
+}
+
 /// A recurrence count limit or inclusive cutoff, defaulting to no cutoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Termination {
