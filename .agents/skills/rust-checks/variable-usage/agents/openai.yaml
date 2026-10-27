@@ -1,0 +1,3 @@
+interface:
+  display_name: "Variable Usage"
+  short_description: "Prefer consuming and borrowing over unnecessary cloning"
