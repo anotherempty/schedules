@@ -1,0 +1,10 @@
+[package]
+name = "calendar-views"
+version.workspace = true
+edition.workspace = true
+description = "Timezone-aware day and week views for arbitrary application data"
+
+[dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
+thiserror.workspace = true

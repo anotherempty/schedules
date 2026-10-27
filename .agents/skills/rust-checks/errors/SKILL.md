@@ -1,125 +1,90 @@
 ---
-description: Design Rust error types and panic policy — Result over unwrap, thiserror for libraries, anyhow for binaries, context that survives the call stack. Use when code calls unwrap or expect outside tests, when designing or refactoring an error enum, when choosing between thiserror and anyhow, or when the user asks how errors should be handled or propagated.
-metadata:
-    source-repository: https://github.com/rewrite-rs/skills
 name: errors
+description: Design and review concrete Rust error types, typed failure context, source preservation, and panic-free production paths. Use when adding or changing errors, reviewing unwrap or expect, handling parsing failures, or choosing error propagation and representation.
+metadata:
+  source-repository: https://github.com/rewrite-rs/skills
 ---
 # Errors
 
-An error type is a contract about what can go wrong and what the caller does
-about it: which failures panic, which become a `Result`, which shape the error
-takes, how much context survives the call stack. Making the failure impossible
-is `/type-driven-design`; whether shape changes break callers, `/api-design`.
+Design concrete errors with typed context, preserve their causes, and keep
+production paths free of deliberate panics. These requirements apply to libraries
+and binaries, including startup and internal invariant checks.
 
-## The panic policy
+## Panic policy
 
-`unwrap` and `expect` are assertions about invariants, not error handling.
-Acceptable: in tests, in `main` for a startup precondition, and after a check
-the compiler cannot see — where `expect` names the invariant and carries the
-values. Unacceptable: in library code on any input-derived value, or anywhere
-the justification is "this can't fail" without saying why.
+1. Do not use `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!`, assertions,
+   `debug_assert!`, or other deliberate panic paths outside tests. There are no
+   exceptions for `main`, startup preconditions, or allegedly impossible states.
+2. Avoid operations that can panic on unchecked input, including unchecked
+   indexing. Use checked access, checked arithmetic, and fallible conversions
+   where input or computed values can exceed supported bounds.
+3. Prefer types that prevent invalid states. Where a failure remains possible,
+   return a meaningful concrete error; do not replace a panic with a silent
+   default or discard the failure.
+4. Assertions and panic-based checks are permitted in tests only. Being in a
+   benchmark, example, or binary does not create a test-only exemption.
 
-Not every failure is a `Result`. A broken internal invariant with no
-caller-recoverable path should panic — the program is already in a state the type
-system promised it would not reach. Input validation is the opposite: whatever
-the input, the caller can respond, so it is always a `Result`.
+## Concrete errors and typed context
 
-## `Result` all the way to a boundary
+1. Use concrete error types with meaningful variants and typed context. Callers
+   must distinguish failure categories without matching display strings.
+2. Do not encode categories, field identities, states, or actions in `String` or
+   `&'static str` payloads such as `Invalid("field")`. Use appropriate enums or
+   domain types. Strings are for actual text, including diagnostic messages.
+3. Keep identifiers, paths, quantities, dates, and other context in their domain
+   representations. A string newtype does not fix unsuitable storage.
+4. Do not erase errors into strings, `anyhow::Error`, or general-purpose boxed
+   errors such as `Box<dyn Error>`, including at binary entry points. A borrowed
+   `dyn Error` returned by the standard `Error::source` API is not error erasure.
+5. Use `thiserror` for mechanical `Display`, `Error`, and conversion implementations
+   when appropriate. Declare dependencies at the workspace root; members inherit
+   them with `workspace = true`.
+6. Choose enum variants or a concrete struct with a typed kind based on callers'
+   needs. Publication alone does not require a wrapper. Preserve useful typed
+   distinctions and consider compatibility when changing the public surface.
 
-Errors propagate with `?` to the layer that can actually decide — retry, report,
-exit. `?` converts through `From`, which is why a `#[from]` on an enum variant
-removes a `map_err` closure at every call site.
+Read [ERROR-TYPES.md](ERROR-TYPES.md) when designing variant shapes, adding source
+context, or choosing between a public enum and a concrete wrapper.
 
-## Which shape: the boundary decides
+## Propagation and ownership
 
-One question settles it: **does this error cross a public API boundary you will
-maintain across releases?**
+1. Propagate recoverable errors with `Result` and `?`; never silently discard
+   errors. Preserve original concrete causes using `#[source]` or `#[from]`.
+2. Add context the current layer knows without replacing the source with its
+   display string. Use `map_err` when adding typed context, not to erase causes.
+3. Put parsing, validation, normalization, and invariant enforcement on the domain
+   type that owns the value. Enforce invariants through constructors, conversions,
+   deserialization, and public mutations; callers must not repeat validation.
+4. Keep each type local: definition, trait implementations, inherent
+   implementations. Borrow for access; consume when transferring ownership.
+5. Log handled failures with `tracing` at the responsible boundary. Do not use
+   printing macros for diagnostics or log the same propagated failure repeatedly.
 
-No — an internal crate, a closed set of failures, an error the caller only ever
-prints — it is an enum, and the enum is the cheaper, better answer:
+## Whole-type review
 
-```rust,ignore
-#[derive(Debug, thiserror::Error)]
-enum LoadError {
-    #[error("cannot read {path}")]
-    Read { path: PathBuf, #[source] source: std::io::Error },
-    #[error("malformed config in {path}")]
-    Parse { path: PathBuf, #[source] source: toml::de::Error },
-}
-```
+Whenever an error or related domain type changes:
 
-Yes — a published library whose callers upgrade without editing their code — it is
-a struct wrapping a private kind, exposing the questions callers actually ask:
-
-```rust,ignore
-pub struct ConfigError { kind: ErrorKind }
-
-impl ConfigError {
-    pub fn is_not_found(&self) -> bool { /* match on the private kind */ }
-    pub fn path(&self) -> &Path { /* ... */ }
-}
-```
-
-The full struct pattern, compiling, is in `ERROR-TYPES.md`.
-
-The public enum fails at that boundary in four independent ways: a variant like
-`Parse(toml::de::Error)` promises for ever which TOML crate you use; adding a
-failure mode breaks caller matches; `#[non_exhaustive]` does not save it, because
-it forces every caller into a `_ =>` arm from day one and so removes the exhaustive
-matching that was the reason to expose an enum; and it pushes work onto callers,
-who re-derive "the config file is missing" from
-`ConfigError::Io(e) if e.kind() == NotFound`. The precedent is `std::io::Error`,
-which is exactly this pattern.
-
-`thiserror` still does the mechanical work either way — `#[source]` chaining and
-`Display` forwarding. Binaries use `anyhow`: a binary error is a message a human
-reads once, so a boxed dynamic error with context is enough. A binary large enough
-to have internal library crates uses `thiserror` inside them and `anyhow` only at
-the top, and `anyhow` in a published library forces every downstream caller to give
-up matching on concrete types — that is the actual reason for the split, not taste.
-
-## Error taxonomy
-
-Split the enum by what the caller does about it, not by where it was raised. If
-two variants always get identical handling, they are one variant. If one variant
-is retryable and another fatal, they must be distinguishable without
-string-matching a message — an `is_retryable()` or `kind()` accessor on a coarse
-enum. On a public struct error the growth question does not arise, because the
-kind is private and adding to it is not a breaking change; `#[non_exhaustive]` is
-for the enum that is public despite the guidance above, buying non-breaking
-growth at the cost of exhaustive matching. The semver rules live in
-`/api-design`.
-
-## Panics that are the right answer
-
-Panic means stop the program, not "return an error loudly": a detected bug — a
-violated internal invariant — panics rather than returning an `Error`, because
-there is no caller who can do anything correct with it. `catch_unwind` is a
-last resort, followed by a controlled restart of the unit that panicked, never
-by carrying on as though nothing happened. For invariants too costly to check
-in release builds, `debug_assert!` keeps the check in dev and test builds.
-
-## Deferrals
-
-Making the illegal state unrepresentable is `/type-driven-design`; whether a
-shape change is a semver break is `/api-design`; expression-level cleanup
-is `/idiomatic`.
+1. Review its complete representation, variants, construction and mutation
+   invariants, parsing and serialization boundaries, trait implementations,
+   source chains, and ownership semantics.
+2. Update affected callers in the same change. Remove redundant allocations,
+   clones, conversions, string comparisons, and duplicated validation.
+3. Reevaluate derives. Small value kinds should implement `Copy` when their
+   fields and semantics permit it; source-bearing errors need not be copyable.
+   Assess `Clone`, `Eq`, `Ord`, and `Hash` by domain semantics.
+4. Resolve related omissions without waiting for the user to identify each one.
+   Report unrelated findings separately; do not expand into an unsolicited
+   repository-wide rewrite.
 
 ## Verification
 
-```bash
-cargo clippy --all-targets   # add -- -D warnings only if the repo has no lint config
-cargo test
-```
+Run relevant tests and the repository's configured lint checks, including
+feature-enabled and feature-disabled builds when error types are feature-gated.
+Test typed variants, context, and source preservation, not only message strings.
+Keep domain and operational numbers named in tests as well as production code.
 
-Run clippy at the lint level configured in the repo — a `clippy.toml` or its own
-lint attributes stay, and a stricter level never goes on top. Then the targeted
-audit the agent runs itself and reads:
-
-```bash
-rg '\.unwrap\(\)|\.expect\(' --glob '!**/tests/**' --glob '!**/benches/**' src/
-```
-
-Every surviving hit needs a one-line justification. `clippy::unwrap_used` and
-`clippy::expect_used` are `restriction` lints: propose them for the repo lint
-config, do not switch them on unilaterally, or override a level already set.
+Inspect affected production code for deliberate panic paths, unchecked operations,
+string-coded categories, erased sources, and ignored errors. Inspect inline test
+modules separately; a file-path filter cannot reliably distinguish test code.
+Passing compilation or Clippy does not replace this review. Fix production
+violations rather than justifying them with comments or lint suppressions.

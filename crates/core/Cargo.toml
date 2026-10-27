@@ -3,7 +3,14 @@ name = "schedules-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+ics = ["dep:ics-document"]
+calendar-views = ["dep:calendar-views"]
+
 [dependencies]
+ics-document = { workspace = true, optional = true }
+calendar-views = { workspace = true, optional = true }
 chrono.workspace = true
 chrono-tz.workspace = true
 thiserror.workspace = true
@@ -12,5 +19,9 @@ thiserror.workspace = true
 criterion.workspace = true
 
 [[bench]]
-name = "scheduler"
+name = "schedule_store"
 harness = false
+
+[[test]]
+name = "calendar_views"
+required-features = ["calendar-views"]
