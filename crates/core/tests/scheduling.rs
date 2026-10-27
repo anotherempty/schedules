@@ -291,8 +291,7 @@ fn weekly_filters_use_monday_based_interval_weeks() {
         Termination::Count(NonZeroU32::new(THREE_OCCURRENCES).unwrap()),
     )
     .unwrap()
-    .with_weekdays([Weekday::Fri, Weekday::Mon, Weekday::Fri])
-    .unwrap();
+    .with_weekdays([Weekday::Fri, Weekday::Mon, Weekday::Fri]);
     let schedule = Schedule::repeating(
         Fixture::point("2026-01-02 09:00:00", chrono_tz::UTC),
         Recurrence::calendar(rule),
@@ -500,16 +499,16 @@ fn inclusive_until_and_validation() {
         Placement::all_day(cutoff.date(), cutoff.date()),
         Err(Error::InvalidRange)
     );
-    let wrong_days = Fixture::rule(Frequency::Weekly, TWO_OCCURRENCES)
-        .with_weekdays([Weekday::Fri])
-        .unwrap();
+    let wrong_days =
+        Fixture::rule(Frequency::Weekly, TWO_OCCURRENCES).with_weekdays([Weekday::Fri]);
     assert_eq!(
         Schedule::repeating(anchor, Recurrence::calendar(wrong_days)),
         Err(Error::InvalidAnchor)
     );
+    let wrong_days = Fixture::rule(Frequency::Daily, TWO_OCCURRENCES).with_weekdays([Weekday::Fri]);
     assert_eq!(
-        Fixture::rule(Frequency::Daily, TWO_OCCURRENCES).with_weekdays([Weekday::Fri]),
-        Err(Error::InvalidWeekdayFilter)
+        Schedule::repeating(anchor, Recurrence::calendar(wrong_days)),
+        Err(Error::InvalidAnchor)
     );
 }
 

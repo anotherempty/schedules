@@ -23,16 +23,16 @@ return `Error::InvalidOccurrenceKey`; `None` means no successor exists across
 exhausted schedules. Candidate budget covers anchor lookup, schedule inspections,
 overrides, and recurrence expansion. Exhaustion returns `Error::CandidateLimit`,
 never an incomplete answer. IDs remain borrowed; no result list is collected.
-Elapsed recurrence seeks by interval arithmetic, including count-limited series.
-Calendar recurrence seeks to the anchor date for forever/until rules. Calendar
-count limits still use bounded historical expansion because timezone gaps do not
-count as occurrences.
+Unfiltered elapsed recurrence seeks by interval arithmetic, including count-limited
+series. Calendar recurrence seeks to the anchor date for forever/until rules.
+Calendar and weekday-filtered elapsed count limits use bounded historical expansion
+because skipped dates, timezone gaps, and excluded weekdays do not count as occurrences.
 
 1. `Placement`: timezone-aware point, timed interval, or date-only all-day range.
 2. `Schedule`: placement plus optional recurrence and per-occurrence overrides.
 3. `CalendarRule`: Gregorian daily, weekly, monthly, or yearly frequency, positive
-   interval, optional weekly weekday set, arbitrary selected local times, and termination.
-4. `Recurrence::elapsed`: fixed positive duration between occurrence starts.
+   interval, optional weekday set, arbitrary selected local times, and termination.
+4. `Recurrence::elapsed`: fixed positive UTC cadence with optional local weekday filtering.
 5. `QueryWindow`: half-open UTC window, all-day viewing timezone, work budget,
    and result budget.
 6. `Schedule::iter`: lazy fallible expansion. Overrides appear first, followed by
@@ -83,7 +83,29 @@ Explicit nonexistent local placements are rejected. Calendar expansion skips
 nonexistent local times and invalid dates without consuming recurrence count.
 Ambiguous local times select earlier/later instant or return an error, according
 to `ResolutionPolicy`. Default selects earlier instant. Weeks begin Monday.
-Monthly/yearly rules retain anchor day rather than clamping to month end.
+Without weekday selection, monthly/yearly rules retain anchor day rather than
+clamping to month end.
+
+`CalendarRule::with_weekdays` and `Recurrence::with_weekdays` replace weekday
+selection, removing duplicates:
+
+1. Daily rules filter the original every-N-days cadence.
+2. Weekly rules expand selected weekdays within matching Monday-based weeks.
+3. Monthly rules expand every selected weekday within matching months.
+4. Yearly rules expand every selected weekday throughout matching years.
+5. Elapsed rules filter starts by local weekday in the placement's timezone,
+   preserving original UTC cadence across excluded days and DST changes.
+
+The initial placement must match the selection; earlier dates in its month/year
+are not emitted. Empty selection restores default behavior: anchor weekday for
+weekly, anchor day for monthly, anchor month/day for yearly, no weekday filter
+for daily or elapsed. Excluded weekdays do not consume occurrence count, but
+each scanned date or elapsed cadence step consumes query work budget. Filtered
+elapsed rules currently scan skipped cadence steps; subsecond rules spanning
+excluded days can require large budgets.
+
+`CalendarRule::with_weekdays` now returns `Self`; remove trailing `?` or `unwrap()`
+from existing calls. The obsolete `Error::InvalidWeekdayFilter` variant is removed.
 
 `CalendarRule::with_times` selects any number of local times on each matching date.
 `TimeSet` stores times uniquely in sorted order, retaining subsecond precision.

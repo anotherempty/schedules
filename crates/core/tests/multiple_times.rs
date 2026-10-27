@@ -76,8 +76,7 @@ fn arbitrary_times_on_four_weekdays_repeat_every_week() {
         EIGHT_OCCURRENCES,
         &["17:00:00", "09:00:00", "09:00:00"],
     )
-    .with_weekdays([Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu])
-    .unwrap();
+    .with_weekdays([Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu]);
     assert_eq!(
         rule.times().iter().collect::<Vec<_>>(),
         [Fixture::time("09:00:00"), Fixture::time("17:00:00")]
@@ -105,8 +104,7 @@ fn arbitrary_times_on_four_weekdays_repeat_every_week() {
         THREE_OCCURRENCES,
         &["08:00:00", "12:30:00", "18:00:00"],
     )
-    .with_weekdays([Weekday::Mon])
-    .unwrap();
+    .with_weekdays([Weekday::Mon]);
     let schedule = Fixture::schedule("2026-01-05 08:00:00", chrono_tz::UTC, rule);
     assert_eq!(
         Fixture::starts(
@@ -131,8 +129,7 @@ fn interval_weeks_and_anchor_cutoff_apply_to_each_time() {
     )
     .unwrap()
     .with_times([Fixture::time("09:00:00"), Fixture::time("17:00:00")])
-    .with_weekdays([Weekday::Mon])
-    .unwrap();
+    .with_weekdays([Weekday::Mon]);
     let schedule = Fixture::schedule("2026-01-05 17:00:00", chrono_tz::UTC, rule);
     assert_eq!(
         Fixture::starts(

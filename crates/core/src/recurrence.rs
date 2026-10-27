@@ -61,10 +61,21 @@ impl TimeSet {
 
 /// A set of weekdays, empty by default.
 ///
-/// An empty selection in a weekly [`CalendarRule`] inherits the anchor weekday.
+/// An empty weekly selection inherits the anchor weekday. Other frequencies
+/// retain their default date pattern without weekday filtering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WeekdaySet {
     bits: u8,
+}
+
+impl FromIterator<Weekday> for WeekdaySet {
+    fn from_iter<T: IntoIterator<Item = Weekday>>(iter: T) -> Self {
+        let mut set = Self::default();
+        for day in iter {
+            set.insert(day);
+        }
+        set
+    }
 }
 
 impl WeekdaySet {
@@ -91,9 +102,9 @@ pub enum Frequency {
     Daily,
     /// Repeats in Monday-based weeks, using selected weekdays or the anchor weekday.
     Weekly,
-    /// Repeats on the anchor day of the month, skipping months without that day.
+    /// Repeats on the anchor day, or every selected weekday in matching months.
     Monthly,
-    /// Repeats on the anchor month and day, skipping years without that date.
+    /// Repeats on the anchor month/day, or every selected weekday in matching years.
     Yearly,
 }
 
@@ -105,7 +116,7 @@ pub enum Termination {
     Forever,
     /// Limits valid original occurrences, including the initial placement.
     ///
-    /// Skipped timezone gaps and invalid dates do not count. Cancelled or replaced
+    /// Skipped weekdays, timezone gaps, and invalid dates do not count. Cancelled or replaced
     /// occurrences still count; overrides do not extend the series.
     Count(NonZeroU32),
     /// Inclusive local cutoff for calendar recurrence only.
@@ -116,8 +127,9 @@ pub enum Termination {
 
 /// Gregorian recurrence anchored to the initial placement.
 ///
-/// Weeks start Monday. Monthly and yearly rules skip invalid dates rather than
-/// clamping to month ends. Calendar times in timezone gaps are skipped.
+/// Weeks start Monday. Without weekday selection, monthly and yearly rules skip
+/// invalid anchor dates rather than clamping. With selection, they expand every
+/// matching weekday in the selected month or year. Timezone gaps are skipped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarRule {
     frequency: Frequency,
@@ -130,7 +142,7 @@ pub struct CalendarRule {
 impl CalendarRule {
     /// Creates a calendar rule with an interval measured in units of `frequency`.
     ///
-    /// Empty weekday and time selections inherit the initial placement values.
+    /// Empty selections retain the frequency's default dates and anchor time.
     /// [`crate::Schedule::repeating`] validates the rule against that placement.
     ///
     /// # Examples
@@ -164,10 +176,13 @@ impl CalendarRule {
         })
     }
 
-    /// Replaces the weekday selection for a weekly rule.
+    /// Replaces the weekday selection, removing duplicates.
     ///
-    /// Empty input uses the anchor weekday; duplicates are removed. The anchor must
-    /// belong to the resulting selection when constructing a repeating schedule.
+    /// Daily rules filter the original every-N-days cadence. Weekly rules select
+    /// weekdays within matching Monday-based weeks. Monthly and yearly rules
+    /// expand every selected weekday in matching months or years, respectively.
+    /// Dates before the anchor are excluded. Empty input restores default dates.
+    /// The anchor must belong to the selection when constructing a schedule.
     ///
     /// # Examples
     ///
@@ -176,28 +191,15 @@ impl CalendarRule {
     /// use schedules_core::{CalendarRule, Error, Frequency, Termination};
     /// use schedules_core::Weekday;
     /// let rule = CalendarRule::new(Frequency::Weekly, NonZeroU32::MIN, Termination::Forever)?
-    ///     .with_weekdays([Weekday::Mon, Weekday::Fri])?;
+    ///     .with_weekdays([Weekday::Mon, Weekday::Fri]);
     /// assert!(rule.weekdays().contains(Weekday::Fri));
     /// assert!(!rule.weekdays().contains(Weekday::Tue));
     /// # Ok::<(), Error>(())
     /// ```
     ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidWeekdayFilter`] unless frequency is [`Frequency::Weekly`],
-    /// even when the input is empty.
-    pub fn with_weekdays(
-        mut self,
-        weekdays: impl IntoIterator<Item = Weekday>,
-    ) -> Result<Self, Error> {
-        if self.frequency != Frequency::Weekly {
-            return Err(Error::InvalidWeekdayFilter);
-        }
-        self.weekdays = WeekdaySet::default();
-        for day in weekdays {
-            self.weekdays.insert(day);
-        }
-        Ok(self)
+    pub fn with_weekdays(mut self, weekdays: impl IntoIterator<Item = Weekday>) -> Self {
+        self.weekdays = weekdays.into_iter().collect();
+        self
     }
 
     /// Returns the calendar unit in which the interval is measured.
@@ -208,7 +210,7 @@ impl CalendarRule {
     pub const fn interval(&self) -> NonZeroU32 {
         self.interval
     }
-    /// Returns explicit weekday selections; empty means the anchor weekday.
+    /// Returns explicit weekdays; empty preserves the frequency's default dates.
     pub const fn weekdays(&self) -> WeekdaySet {
         self.weekdays
     }
@@ -258,7 +260,10 @@ impl CalendarRule {
         }
         let interval = i64::from(self.interval.get());
         match self.frequency {
-            Frequency::Daily => days % interval == 0,
+            Frequency::Daily => {
+                days % interval == 0
+                    && (self.weekdays.is_empty() || self.weekdays.contains(date.weekday()))
+            }
             Frequency::Weekly => {
                 let weeks =
                     (days + i64::from(anchor.weekday().num_days_from_monday())) / DAYS_PER_WEEK;
@@ -273,12 +278,20 @@ impl CalendarRule {
                 let months = i64::from(date.year() - anchor.year()) * MONTHS_PER_YEAR
                     + i64::from(date.month())
                     - i64::from(anchor.month());
-                months % interval == 0 && date.day() == anchor.day()
+                months % interval == 0
+                    && if self.weekdays.is_empty() {
+                        date.day() == anchor.day()
+                    } else {
+                        self.weekdays.contains(date.weekday())
+                    }
             }
             Frequency::Yearly => {
                 i64::from(date.year() - anchor.year()) % interval == 0
-                    && date.month() == anchor.month()
-                    && date.day() == anchor.day()
+                    && if self.weekdays.is_empty() {
+                        date.month() == anchor.month() && date.day() == anchor.day()
+                    } else {
+                        self.weekdays.contains(date.weekday())
+                    }
             }
         }
     }
@@ -302,7 +315,7 @@ impl Recurrence {
         }
     }
 
-    /// Creates a recurrence with fixed positive spacing between UTC starts.
+    /// Creates a recurrence with a fixed positive UTC cadence.
     ///
     /// # Examples
     ///
@@ -329,8 +342,44 @@ impl Recurrence {
             kind: RecurrenceKind::Elapsed {
                 interval,
                 termination,
+                weekdays: WeekdaySet::default(),
             },
         })
+    }
+
+    /// Replaces selected weekdays for calendar or elapsed recurrence.
+    ///
+    /// Calendar behavior follows [`CalendarRule::with_weekdays`]. Elapsed rules
+    /// filter starts by local weekday in the placement's timezone, preserving
+    /// the original UTC cadence across skipped days and DST transitions. Skips
+    /// do not consume occurrence count. Empty input removes elapsed filtering.
+    /// [`crate::Schedule::repeating`] requires the anchor weekday to match.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use schedules_core::{Duration, Error, Recurrence, Termination, Weekday};
+    /// const POLL_INTERVAL: Duration = Duration::minutes(15);
+    /// let recurrence = Recurrence::elapsed(POLL_INTERVAL, Termination::Forever)?
+    ///     .with_weekdays([Weekday::Mon, Weekday::Tue]);
+    /// assert!(recurrence.weekdays().contains(Weekday::Mon));
+    /// # Ok::<(), Error>(())
+    /// ```
+    pub fn with_weekdays(mut self, weekdays: impl IntoIterator<Item = Weekday>) -> Self {
+        let selection = weekdays.into_iter().collect();
+        match &mut self.kind {
+            RecurrenceKind::Calendar(rule) => rule.weekdays = selection,
+            RecurrenceKind::Elapsed { weekdays, .. } => *weekdays = selection,
+        }
+        self
+    }
+
+    /// Returns explicit weekday selection; empty retains the rule's default pattern.
+    pub fn weekdays(&self) -> WeekdaySet {
+        match &self.kind {
+            RecurrenceKind::Calendar(rule) => rule.weekdays(),
+            RecurrenceKind::Elapsed { weekdays, .. } => *weekdays,
+        }
     }
 
     /// Returns the calendar rule, or `None` for elapsed recurrence.
@@ -341,7 +390,9 @@ impl Recurrence {
         }
     }
 
-    /// Returns UTC spacing between starts, or `None` for calendar recurrence.
+    /// Returns UTC cadence, or `None` for calendar recurrence.
+    ///
+    /// Weekday filtering can leave multiples of this interval between emitted starts.
     pub fn elapsed_interval(&self) -> Option<Duration> {
         match self.kind {
             RecurrenceKind::Elapsed { interval, .. } => Some(interval),
@@ -364,5 +415,6 @@ pub(crate) enum RecurrenceKind {
     Elapsed {
         interval: Duration,
         termination: Termination,
+        weekdays: WeekdaySet,
     },
 }

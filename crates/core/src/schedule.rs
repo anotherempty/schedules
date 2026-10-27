@@ -2,7 +2,7 @@
 
 use std::{cmp::Ordering, collections::BTreeMap, num::NonZeroUsize};
 
-use chrono::{DateTime, Duration, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDateTime, NaiveTime, Utc};
 use chrono_tz::Tz;
 
 use crate::query::{OccurrencePosition, SearchBudget};
@@ -68,6 +68,14 @@ impl Schedule {
             && placement.timezone().is_none()
         {
             return Err(Error::ElapsedAllDay);
+        }
+        if recurrence.elapsed_interval().is_some()
+            && !recurrence.weekdays().is_empty()
+            && !recurrence
+                .weekdays()
+                .contains(placement.local_start().weekday())
+        {
+            return Err(Error::InvalidAnchor);
         }
         if let Some(rule) = recurrence.calendar_rule() {
             if !rule.times().is_empty() {
@@ -322,7 +330,8 @@ impl Schedule {
     /// Replacements come first in original-key order, followed by regular occurrences
     /// in recurrence order. Use [`Self::occurrences`] for chronological sorting.
     /// Each inspected override and recurrence candidate costs one candidate unit,
-    /// including cancellations, skipped dates, and candidates before the window.
+    /// including cancellations, skipped dates/weekdays, and candidates before the window.
+    /// Filtered elapsed rules inspect each cadence step, including excluded weekdays.
     /// Replaced originals also cost a unit when encountered during recurrence expansion.
     ///
     /// # Examples
@@ -556,6 +565,13 @@ impl<'a> Expansion<'a> {
         let Some(interval) = recurrence.elapsed_interval() else {
             return Ok(());
         };
+        // Filtered COUNT ranks accepted starts, not cadence steps. Preserve
+        // bounded historical expansion to determine the accepted rank.
+        if !recurrence.weekdays().is_empty()
+            && matches!(recurrence.termination(), Termination::Count(_))
+        {
+            return Ok(());
+        }
         // i128 preserves nanosecond precision across Chrono's full date range.
         let delta = target.signed_duration_since(origin);
         let delta_nanos = i128::from(delta.num_seconds()) * NANOSECONDS_PER_SECOND
@@ -660,6 +676,7 @@ impl<'a> Expansion<'a> {
                 Some(RecurrenceKind::Elapsed {
                     interval,
                     termination,
+                    ..
                 }) => {
                     let Some(instant) = self.instant else {
                         return Err(Error::ElapsedAllDay);
@@ -722,7 +739,22 @@ impl<'a> Expansion<'a> {
             return Ok(Candidate::Skip);
         }
         let placement = match self.instant {
-            Some(instant) => self.schedule.placement.at_instant(instant)?,
+            Some(instant) => {
+                if let Some(recurrence) = recurrence
+                    && !recurrence.weekdays().is_empty()
+                {
+                    let zone = self
+                        .schedule
+                        .placement
+                        .timezone()
+                        .ok_or(Error::ElapsedAllDay)?;
+                    let local = Placement::local_at(instant, zone)?;
+                    if !recurrence.weekdays().contains(local.weekday()) {
+                        return Ok(Candidate::Skip);
+                    }
+                }
+                self.schedule.placement.at_instant(instant)?
+            }
             None => match self.schedule.placement.at_local(self.local) {
                 Err(Error::NonexistentTime { .. }) if recurrence.is_some() => {
                     return Ok(Candidate::Skip);

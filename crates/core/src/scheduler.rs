@@ -111,8 +111,9 @@ impl<ItemId: Ord> Scheduler<ItemId> {
     /// No date window is required. `None` means every schedule was exhausted without
     /// a successor. The shared candidate budget covers anchor resolution, schedule
     /// inspections, overrides, and recurrence candidates, including skipped dates.
-    /// Count-limited calendar rules may require scanning historical candidates to
-    /// determine membership, so distant anchors can require larger budgets.
+    /// Count-limited calendar rules and weekday-filtered elapsed rules require
+    /// scanning historical candidates to determine membership, so distant anchors
+    /// can require larger budgets.
     ///
     /// # Examples
     ///

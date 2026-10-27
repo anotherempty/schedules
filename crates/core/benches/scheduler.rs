@@ -90,7 +90,7 @@ impl Fixture {
             times.push(NaiveTime::parse_from_str(time, TIME_FORMAT)?);
         }
         let rule = CalendarRule::new(Frequency::Weekly, NonZeroU32::MIN, Termination::Forever)?
-            .with_weekdays([Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu])?
+            .with_weekdays([Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu])
             .with_times(times);
         let zones = [
             chrono_tz::Europe::London,

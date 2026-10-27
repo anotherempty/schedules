@@ -37,9 +37,6 @@ pub enum Error {
     /// An all-day calendar recurrence explicitly selects times of day.
     #[error("all-day recurrence cannot select times of day")]
     AllDayTimes,
-    /// A weekday selection was applied to a nonweekly calendar rule.
-    #[error("weekday filters require weekly frequency")]
-    InvalidWeekdayFilter,
     /// The initial placement does not match the selected weekdays or times.
     #[error("initial placement must match recurrence rule")]
     InvalidAnchor,
