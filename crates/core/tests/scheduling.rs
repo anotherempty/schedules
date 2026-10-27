@@ -18,6 +18,57 @@ const MEETING_HOURS: i64 = 2;
 const ONE_HOUR_SECONDS: i64 = 3_600;
 const ONE_OCCURRENCE: u32 = 1;
 
+#[test]
+fn query_stops_before_future_ambiguity() {
+    let anchor = Placement::point(
+        Fixture::local("2026-10-24 01:30:00"),
+        chrono_tz::Europe::London,
+        ResolutionPolicy::new(AmbiguityPolicy::Reject),
+    )
+    .unwrap();
+    let rule = CalendarRule::new(Frequency::Daily, NonZeroU32::MIN, Termination::Forever).unwrap();
+    let schedule = Schedule::repeating(anchor, Recurrence::calendar(rule)).unwrap();
+    for end in ["2026-10-24T23:00:00Z", "2026-10-25T00:30:00Z"] {
+        let items = schedule
+            .occurrences(Fixture::window("2026-10-24T00:00:00Z", end))
+            .unwrap();
+        assert_eq!(
+            Fixture::starts(&items),
+            [Fixture::instant("2026-10-24T00:30:00Z")]
+        );
+    }
+    assert!(matches!(
+        schedule.occurrences(Fixture::window(
+            "2026-10-24T00:00:00Z",
+            "2026-10-25T01:00:00Z"
+        )),
+        Err(Error::AmbiguousTime { .. })
+    ));
+}
+
+#[test]
+fn elapsed_cutoff_prevents_overflowing_advance() {
+    let anchor = Fixture::point("2026-01-01 00:00:00", chrono_tz::UTC);
+    for cutoff in ["2026-01-01T00:00:00Z", "2026-01-01T12:00:00Z"] {
+        let recurrence = Recurrence::elapsed(
+            Duration::MAX,
+            Termination::UntilInstant(Fixture::instant(cutoff)),
+        )
+        .unwrap();
+        let schedule = Schedule::repeating(anchor, recurrence).unwrap();
+        let items = schedule
+            .occurrences(Fixture::window(
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+            ))
+            .unwrap();
+        assert_eq!(
+            Fixture::starts(&items),
+            [Fixture::instant("2026-01-01T00:00:00Z")]
+        );
+    }
+}
+
 struct Fixture;
 
 impl Fixture {

@@ -13,6 +13,25 @@ const ONE_SCHEDULE_WORK: usize = 2;
 const TWO_SCHEDULES_WORK: usize = 4;
 const ONE_ITEM: usize = 1;
 
+#[test]
+fn exact_inspection_budget_allows_future_schedule_without_candidates() {
+    let mut scheduler = Scheduler::new();
+    scheduler.insert(
+        ItemId::Meeting,
+        Schedule::once(Fixture::point("2026-02-01 09:00:00")),
+    );
+    let window = QueryWindow {
+        candidate_limit: NonZeroUsize::MIN,
+        ..Fixture::window()
+    };
+    assert!(scheduler.occurrences(window).unwrap().is_empty());
+    scheduler.insert(
+        ItemId::Meeting,
+        Schedule::once(Fixture::point("2026-01-01 09:00:00")),
+    );
+    assert_eq!(scheduler.occurrences(window), Err(Error::CandidateLimit));
+}
+
 // Deliberately non-Clone: scheduler queries must borrow identity.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ItemId {

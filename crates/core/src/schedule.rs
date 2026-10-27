@@ -5,7 +5,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use crate::recurrence::RecurrenceKind;
 use crate::{
     Error, Occurrence, OccurrenceKey, OccurrenceOverride, Placement, QueryWindow, Recurrence,
-    Termination,
+    ResolutionPolicy, Termination,
 };
 
 /// Schedule definition. Caller owns identity and application payload.
@@ -100,12 +100,14 @@ impl Schedule {
         }
         let mut cursor = Expansion::new(self)?;
         for _ in 0..candidate_limit.get() {
-            match cursor.next_candidate()? {
+            if !cursor.advance(None)? {
+                return Err(Error::InvalidOccurrenceKey);
+            }
+            match cursor.candidate()? {
                 Candidate::Occurrence(occurrence) if occurrence.key() == key => {
                     self.overrides.insert(key, change);
                     return Ok(());
                 }
-                Candidate::End => return Err(Error::InvalidOccurrenceKey),
                 Candidate::Occurrence(occurrence) if occurrence.key() > key => {
                     return Err(Error::InvalidOccurrenceKey);
                 }
@@ -143,10 +145,19 @@ impl Schedule {
     /// Lazy, bounded expansion. Replacements come first in original-key order, then regular
     /// occurrences in recurrence order. Use `occurrences` for chronological sorting.
     pub fn iter(&self, window: QueryWindow) -> Result<Occurrences<'_>, Error> {
+        self.iter_with_budget(window, window.candidate_limit.get())
+    }
+
+    pub(crate) fn iter_with_budget(
+        &self,
+        window: QueryWindow,
+        candidate_limit: usize,
+    ) -> Result<Occurrences<'_>, Error> {
         Ok(Occurrences {
             cursor: Expansion::new(self)?,
             overrides: self.overrides.iter(),
             window,
+            candidate_limit,
             work: 0,
             returned: 0,
             finished: false,
@@ -159,6 +170,7 @@ pub struct Occurrences<'a> {
     cursor: Expansion<'a>,
     overrides: std::collections::btree_map::Iter<'a, OccurrenceKey, OccurrenceOverride>,
     window: QueryWindow,
+    candidate_limit: usize,
     work: usize,
     returned: usize,
     finished: bool,
@@ -193,7 +205,7 @@ impl Occurrences<'_> {
     }
 
     fn charge(&mut self) -> Result<(), Error> {
-        if self.work >= self.window.candidate_limit.get() {
+        if self.work >= self.candidate_limit {
             return Err(Error::CandidateLimit);
         }
         self.work += 1;
@@ -209,12 +221,11 @@ impl Occurrences<'_> {
                     OccurrenceOverride::Replace(placement) => Occurrence::new(key, placement),
                 }
             } else {
-                if self.cursor.past_window(self.window)? {
+                if !self.cursor.advance(Some(self.window))? {
                     return Ok(None);
                 }
                 self.charge()?;
-                match self.cursor.next_candidate()? {
-                    Candidate::End => return Ok(None),
+                match self.cursor.candidate()? {
                     Candidate::Skip => continue,
                     Candidate::Occurrence(occurrence) => {
                         if self
@@ -242,6 +253,7 @@ impl Occurrences<'_> {
 
 struct Expansion<'a> {
     schedule: &'a Schedule,
+    // Calendar cursor; elapsed recurrence advances `instant` instead.
     local: NaiveDateTime,
     instant: Option<DateTime<Utc>>,
     emitted: u32,
@@ -272,9 +284,6 @@ impl<'a> Expansion<'a> {
     }
 
     fn past_window(&self, window: QueryWindow) -> Result<bool, Error> {
-        if self.complete() {
-            return Ok(true);
-        }
         if let Some(instant) = self.instant {
             return Ok(instant >= window.range.end());
         }
@@ -283,20 +292,30 @@ impl<'a> Expansion<'a> {
             .placement
             .timezone()
             .unwrap_or(window.all_day_zone);
-        // Include entire local end date to avoid assumptions about UTC offset changes.
-        Ok(self.local.date() > Placement::local_at(window.range.end(), zone)?.date())
+        // Use the earliest side of a fold: Reject must still report ambiguity
+        // whenever either possible start precedes the exclusive window end.
+        match ResolutionPolicy::default().resolve(self.local, zone) {
+            Ok(start) => Ok(start >= window.range.end()),
+            Err(Error::NonexistentTime { .. }) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
-    fn next_candidate(&mut self) -> Result<Candidate, Error> {
+    fn advance(&mut self, window: Option<QueryWindow>) -> Result<bool, Error> {
         if self.complete() {
-            return Ok(Candidate::End);
+            return Ok(false);
+        }
+        if let Some(window) = window
+            && self.past_window(window)?
+        {
+            return Ok(false);
         }
         let recurrence = self.schedule.recurrence.as_ref();
         if self.started {
             match recurrence.map(|value| &value.kind) {
                 None => {
                     self.finished = true;
-                    return Ok(Candidate::End);
+                    return Ok(false);
                 }
                 Some(RecurrenceKind::Calendar(rule)) => {
                     if rule.matches(
@@ -314,20 +333,28 @@ impl<'a> Expansion<'a> {
                         self.local = date.and_time(time);
                     }
                 }
-                Some(RecurrenceKind::Elapsed { interval, .. }) => {
+                Some(RecurrenceKind::Elapsed {
+                    interval,
+                    termination,
+                }) => {
                     let Some(instant) = self.instant else {
                         return Err(Error::ElapsedAllDay);
                     };
+                    if let Termination::UntilInstant(until) = termination
+                        && *interval > until.signed_duration_since(instant)
+                    {
+                        self.finished = true;
+                        return Ok(false);
+                    }
+                    if let Some(window) = window
+                        && *interval >= window.range.end().signed_duration_since(instant)
+                    {
+                        return Ok(false);
+                    }
                     let instant = instant
                         .checked_add_signed(*interval)
                         .ok_or(Error::OutOfRange)?;
                     self.instant = Some(instant);
-                    let zone = self
-                        .schedule
-                        .placement
-                        .timezone()
-                        .ok_or(Error::ElapsedAllDay)?;
-                    self.local = Placement::local_at(instant, zone)?;
                 }
             }
         }
@@ -336,28 +363,39 @@ impl<'a> Expansion<'a> {
             match recurrence.termination() {
                 Termination::Count(count) if self.emitted >= count.get() => {
                     self.finished = true;
-                    return Ok(Candidate::End);
+                    return Ok(false);
                 }
                 Termination::Until(until) if self.local > until => {
                     self.finished = true;
-                    return Ok(Candidate::End);
+                    return Ok(false);
                 }
                 Termination::UntilInstant(until)
                     if self.instant.is_some_and(|instant| instant > until) =>
                 {
                     self.finished = true;
-                    return Ok(Candidate::End);
+                    return Ok(false);
                 }
                 _ => {}
             }
-            if let RecurrenceKind::Calendar(rule) = &recurrence.kind
-                && !rule.matches(
-                    self.schedule.placement.local_start().date(),
-                    self.local.date(),
-                )
-            {
-                return Ok(Candidate::Skip);
-            }
+        }
+        if let Some(window) = window
+            && self.past_window(window)?
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn candidate(&mut self) -> Result<Candidate, Error> {
+        let recurrence = self.schedule.recurrence.as_ref();
+        if let Some(recurrence) = recurrence
+            && let RecurrenceKind::Calendar(rule) = &recurrence.kind
+            && !rule.matches(
+                self.schedule.placement.local_start().date(),
+                self.local.date(),
+            )
+        {
+            return Ok(Candidate::Skip);
         }
         let placement = match self.instant {
             Some(instant) => self.schedule.placement.at_instant(instant)?,
@@ -389,6 +427,10 @@ impl<'a> Expansion<'a> {
             {
                 None => self.started,
                 Some(Termination::Count(count)) => self.emitted >= count.get(),
+                Some(Termination::Until(until)) => self.started && self.local >= until,
+                Some(Termination::UntilInstant(until)) => {
+                    self.started && self.instant.is_some_and(|instant| instant >= until)
+                }
                 _ => false,
             }
     }
@@ -397,5 +439,4 @@ impl<'a> Expansion<'a> {
 enum Candidate {
     Occurrence(Occurrence),
     Skip,
-    End,
 }

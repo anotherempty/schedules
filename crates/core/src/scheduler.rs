@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, num::NonZeroUsize};
+use std::collections::BTreeMap;
 
 use crate::{Error, Occurrence, QueryWindow, Schedule};
 
@@ -68,12 +68,8 @@ impl<ItemId: Ord> Scheduler<ItemId> {
                 return Err(Error::CandidateLimit);
             }
             work += 1;
-            let remaining = NonZeroUsize::new(window.candidate_limit.get() - work)
-                .ok_or(Error::CandidateLimit)?;
-            let mut occurrences = schedule.iter(QueryWindow {
-                candidate_limit: remaining,
-                ..window
-            })?;
+            let remaining = window.candidate_limit.get() - work;
+            let mut occurrences = schedule.iter_with_budget(window, remaining)?;
             for occurrence in occurrences.by_ref() {
                 let occurrence = occurrence?;
                 if results.len() >= window.occurrence_limit.get() {
