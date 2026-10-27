@@ -1,3 +1,3 @@
 interface:
   display_name: "Errors"
-  short_description: "Result over unwrap, and error types callers can act on"
+  short_description: "Concrete typed errors and panic-free production paths"
