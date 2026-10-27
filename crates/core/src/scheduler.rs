@@ -1,6 +1,10 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, num::NonZeroUsize};
 
-use crate::{Error, Occurrence, QueryWindow, Schedule};
+use chrono_tz::Tz;
+
+use crate::query::{OccurrencePosition, SearchBudget};
+
+use crate::{Error, Occurrence, OccurrenceKey, QueryWindow, Schedule};
 
 /// In-memory schedules keyed by application-owned item identifiers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +55,59 @@ impl<ItemId: Ord> Scheduler<ItemId> {
         &self,
     ) -> impl DoubleEndedIterator<Item = (&ItemId, &Schedule)> + ExactSizeIterator {
         self.schedules.iter()
+    }
+
+    /// Return the next occurrence after an item's occurrence across all schedules.
+    ///
+    /// Orders by UTC start, item ID, then original occurrence key, as in
+    /// [`Self::occurrences`]. The successor can belong to the same item or share
+    /// the anchor's start time. Overrides determine actual placement; cancelled
+    /// anchors are invalid. All-day starts use `all_day_zone`.
+    ///
+    /// Searches without a date window and retains only one successor per schedule.
+    /// `None` means all schedules were exhausted without a successor.
+    /// The shared candidate budget covers anchor resolution, schedule inspections,
+    /// overrides, and recurrence candidates (including skipped dates).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidOccurrenceKey`] for a missing item, invalid key,
+    /// or cancelled anchor. Returns [`Error::CandidateLimit`] if the search cannot
+    /// finish within budget; never returns a partial answer. Propagates temporal
+    /// resolution and range errors. Elapsed recurrence seeks arithmetically; calendar
+    /// recurrence seeks to the anchor date unless a count limit requires bounded
+    /// historical expansion to count valid occurrences (excluding timezone gaps).
+    pub fn next_after(
+        &self,
+        item_id: &ItemId,
+        key: OccurrenceKey,
+        all_day_zone: Tz,
+        candidate_limit: NonZeroUsize,
+    ) -> Result<Option<ScheduledOccurrence<'_, ItemId>>, Error> {
+        let mut budget = SearchBudget::new(candidate_limit);
+        let schedule = self.get(item_id).ok_or(Error::InvalidOccurrenceKey)?;
+        let anchor =
+            OccurrencePosition::new(schedule.occurrence_at(key, &mut budget)?, all_day_zone)?;
+        let mut best: Option<(OccurrencePosition, ScheduledOccurrence<'_, ItemId>)> = None;
+        for (candidate_id, schedule) in &self.schedules {
+            if let Some(occurrence) =
+                schedule.successor(anchor, candidate_id.cmp(item_id), all_day_zone, &mut budget)?
+            {
+                let position = OccurrencePosition::new(occurrence, all_day_zone)?;
+                if best.as_ref().is_none_or(|(current, entry)| {
+                    current.follows(position, entry.item_id.cmp(candidate_id))
+                }) {
+                    best = Some((
+                        position,
+                        ScheduledOccurrence {
+                            item_id: candidate_id,
+                            occurrence,
+                        },
+                    ));
+                }
+            }
+        }
+        Ok(best.map(|(_, entry)| entry))
     }
 
     /// Query all items, sorted by UTC start, item ID, and original occurrence key.

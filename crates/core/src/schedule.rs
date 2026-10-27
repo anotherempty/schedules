@@ -1,12 +1,16 @@
-use std::{collections::BTreeMap, num::NonZeroUsize};
+use std::{cmp::Ordering, collections::BTreeMap, num::NonZeroUsize};
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, NaiveTime, Utc};
+use chrono_tz::Tz;
 
+use crate::query::{OccurrencePosition, SearchBudget};
 use crate::recurrence::RecurrenceKind;
 use crate::{
     Error, Occurrence, OccurrenceKey, OccurrenceOverride, Placement, QueryWindow, Recurrence,
     ResolutionPolicy, Termination,
 };
+
+const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
 
 /// Schedule definition. Caller owns identity and application payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +123,79 @@ impl Schedule {
 
     pub fn remove_override(&mut self, key: OccurrenceKey) -> Option<OccurrenceOverride> {
         self.overrides.remove(&key)
+    }
+
+    pub(crate) fn occurrence_at(
+        &self,
+        key: OccurrenceKey,
+        budget: &mut SearchBudget,
+    ) -> Result<Occurrence, Error> {
+        budget.charge()?;
+        // Override membership was validated when inserted.
+        if let Some(change) = self.overrides.get(&key) {
+            return match change {
+                OccurrenceOverride::Cancel => Err(Error::InvalidOccurrenceKey),
+                OccurrenceOverride::Replace(placement) => Ok(Occurrence::new(key, *placement)),
+            };
+        }
+        let mut cursor = Expansion::at_key(self, key)?;
+        while cursor.advance(None)? {
+            budget.charge()?;
+            if let Candidate::Occurrence(occurrence) = cursor.candidate()? {
+                if std::mem::discriminant(&occurrence.key()) != std::mem::discriminant(&key) {
+                    return Err(Error::InvalidOccurrenceKey);
+                }
+                match occurrence.key().cmp(&key) {
+                    Ordering::Equal => return Ok(occurrence),
+                    Ordering::Greater => return Err(Error::InvalidOccurrenceKey),
+                    Ordering::Less => {}
+                }
+            }
+        }
+        Err(Error::InvalidOccurrenceKey)
+    }
+
+    pub(crate) fn successor(
+        &self,
+        anchor: OccurrencePosition,
+        item_order: Ordering,
+        zone: Tz,
+        budget: &mut SearchBudget,
+    ) -> Result<Option<Occurrence>, Error> {
+        budget.charge()?;
+        let mut best: Option<(OccurrencePosition, Occurrence)> = None;
+        // Replacements can move arbitrarily far in either direction.
+        for (&key, &change) in &self.overrides {
+            budget.charge()?;
+            if let OccurrenceOverride::Replace(placement) = change {
+                let occurrence = Occurrence::new(key, placement);
+                let position = OccurrencePosition::new(occurrence, zone)?;
+                if position.follows(anchor, item_order)
+                    && best.is_none_or(|(current, _)| position < current)
+                {
+                    best = Some((position, occurrence));
+                }
+            }
+        }
+        let mut cursor = Expansion::near(self, anchor.start(), zone)?;
+        while cursor.advance(None)? {
+            budget.charge()?;
+            let Candidate::Occurrence(occurrence) = cursor.candidate()? else {
+                continue;
+            };
+            let position = OccurrencePosition::new(occurrence, zone)?;
+            // Regular occurrences are chronological; later ones cannot beat best.
+            if best.is_some_and(|(current, _)| position >= current) {
+                break;
+            }
+            if !self.overrides.contains_key(&occurrence.key())
+                && position.follows(anchor, item_order)
+            {
+                best = Some((position, occurrence));
+                break;
+            }
+        }
+        Ok(best.map(|(_, occurrence)| occurrence))
     }
 
     /// Return overlapping occurrences ordered by resolved start, then original key.
@@ -265,6 +342,115 @@ struct Expansion<'a> {
 }
 
 impl<'a> Expansion<'a> {
+    fn at_key(schedule: &'a Schedule, key: OccurrenceKey) -> Result<Self, Error> {
+        let mut cursor = Self::new(schedule)?;
+        match (key, cursor.instant) {
+            (OccurrenceKey::Elapsed(instant), Some(_)) => cursor.seek_elapsed(instant)?,
+            (OccurrenceKey::Calendar(local), None) if schedule.placement.dates().is_none() => {
+                cursor.seek_local_key(local)?;
+            }
+            (OccurrenceKey::Date(date), None) if schedule.placement.dates().is_some() => {
+                cursor.seek_local_key(date.and_time(NaiveTime::MIN))?;
+            }
+            _ => return Err(Error::InvalidOccurrenceKey),
+        }
+        Ok(cursor)
+    }
+
+    fn seek_local_key(&mut self, local: NaiveDateTime) -> Result<(), Error> {
+        if local < self.local {
+            return Err(Error::InvalidOccurrenceKey);
+        }
+        let Some(rule) = self
+            .schedule
+            .recurrence
+            .as_ref()
+            .and_then(Recurrence::calendar_rule)
+        else {
+            return if local == self.local {
+                Ok(())
+            } else {
+                Err(Error::InvalidOccurrenceKey)
+            };
+        };
+        let valid_time = if rule.times().is_empty() {
+            local.time() == self.local.time()
+        } else {
+            rule.times().contains(local.time())
+        };
+        if !rule.matches(self.local.date(), local.date()) || !valid_time {
+            return Err(Error::InvalidOccurrenceKey);
+        }
+        // Calendar COUNT counts resolved occurrences, excluding timezone gaps.
+        // Its rank still requires bounded expansion; other rules seek directly.
+        if !matches!(rule.termination(), Termination::Count(_)) {
+            self.local = local;
+        }
+        Ok(())
+    }
+
+    fn near(schedule: &'a Schedule, start: DateTime<Utc>, zone: Tz) -> Result<Self, Error> {
+        let mut cursor = Self::new(schedule)?;
+        if cursor.instant.is_some() {
+            cursor.seek_elapsed(start)?;
+        } else if let Some(rule) = schedule
+            .recurrence
+            .as_ref()
+            .and_then(Recurrence::calendar_rule)
+            && !matches!(rule.termination(), Termination::Count(_))
+        {
+            let local = Placement::local_at(start, schedule.placement.timezone().unwrap_or(zone))?;
+            // Start at the day's first selected time, preserving both sides of
+            // folds when the anchor belongs to another schedule or was moved.
+            let time = rule.times().first().unwrap_or(cursor.local.time());
+            cursor.local = cursor.local.max(local.date().and_time(time));
+        }
+        Ok(cursor)
+    }
+
+    fn seek_elapsed(&mut self, target: DateTime<Utc>) -> Result<(), Error> {
+        let Some(origin) = self.instant else {
+            return Ok(());
+        };
+        if target <= origin {
+            return Ok(());
+        }
+        let Some(recurrence) = self.schedule.recurrence.as_ref() else {
+            return Ok(());
+        };
+        let Some(interval) = recurrence.elapsed_interval() else {
+            return Ok(());
+        };
+        // i128 preserves nanosecond precision across Chrono's full date range.
+        let delta = target.signed_duration_since(origin);
+        let delta_nanos = i128::from(delta.num_seconds()) * NANOSECONDS_PER_SECOND
+            + i128::from(delta.subsec_nanos());
+        let interval_nanos = i128::from(interval.num_seconds()) * NANOSECONDS_PER_SECOND
+            + i128::from(interval.subsec_nanos());
+        let skipped = delta_nanos / interval_nanos;
+        if let Termination::Count(count) = recurrence.termination() {
+            if skipped >= i128::from(count.get()) {
+                self.finished = true;
+                return Ok(());
+            }
+            self.emitted = u32::try_from(skipped).map_err(|_| Error::OutOfRange)?;
+        }
+        let remainder = delta_nanos % interval_nanos;
+        let seconds =
+            i64::try_from(remainder / NANOSECONDS_PER_SECOND).map_err(|_| Error::OutOfRange)?;
+        let nanos =
+            i64::try_from(remainder % NANOSECONDS_PER_SECOND).map_err(|_| Error::OutOfRange)?;
+        let remainder = Duration::try_seconds(seconds)
+            .and_then(|value| value.checked_add(&Duration::nanoseconds(nanos)))
+            .ok_or(Error::OutOfRange)?;
+        self.instant = Some(
+            target
+                .checked_sub_signed(remainder)
+                .ok_or(Error::OutOfRange)?,
+        );
+        Ok(())
+    }
+
     fn new(schedule: &'a Schedule) -> Result<Self, Error> {
         let instant = if schedule
             .recurrence

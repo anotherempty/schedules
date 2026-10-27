@@ -28,6 +28,6 @@ pub enum Error {
     CandidateLimit,
     #[error("expansion exceeded occurrence limit")]
     OccurrenceLimit,
-    #[error("override key does not identify an occurrence in this schedule")]
+    #[error("key does not identify an occurrence in the schedule or query results")]
     InvalidOccurrenceKey,
 }

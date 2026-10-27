@@ -15,6 +15,19 @@ Work and result budgets apply across the entire query. Inspecting a schedule cos
 one additional work unit, including schedules without matching occurrences.
 Any expansion failure returns an error and discards partial results.
 
+`Scheduler::next_after(&item_id, occurrence_key, all_day_zone, candidate_limit)`
+searches directly for one successor, without a date window or result limit.
+Ordering matches `occurrences`, including ties and repeated occurrences of the
+same item. Overrides determine actual placement. Missing or cancelled anchors
+return `Error::InvalidOccurrenceKey`; `None` means no successor exists across
+exhausted schedules. Candidate budget covers anchor lookup, schedule inspections,
+overrides, and recurrence expansion. Exhaustion returns `Error::CandidateLimit`,
+never an incomplete answer. IDs remain borrowed; no result list is collected.
+Elapsed recurrence seeks by interval arithmetic, including count-limited series.
+Calendar recurrence seeks to the anchor date for forever/until rules. Calendar
+count limits still use bounded historical expansion because timezone gaps do not
+count as occurrences.
+
 1. `Placement`: timezone-aware point, timed interval, or date-only all-day range.
 2. `Schedule`: placement plus optional recurrence and per-occurrence overrides.
 3. `CalendarRule`: Gregorian daily, weekly, monthly, or yearly frequency, positive
@@ -102,3 +115,13 @@ returns 24 occurrences per item. Recent and year-old anchors expose expansion's
 history-scanning cost. Setup and successful result-count verification occur outside
 timed iterations; query expansion, timezone resolution, allocation, sorting, and
 result destruction are measured. Criterion stores reports under `target/criterion`.
+
+`scheduler_next_after` measures one-successor searches using the same item counts,
+timezones, and recent/year-old schedules. Anchor occurrence stays in March 2026,
+so year-old cases verify that seeking avoids historical expansion. Setup validates the successor
+against sorted query results outside timed iterations. Throughput counts one
+successor per query. Run only this group with:
+
+```sh
+cargo bench -p schedules-core --bench scheduler -- scheduler_next_after
+```
