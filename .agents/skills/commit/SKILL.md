@@ -9,6 +9,9 @@ name: commit
 ---
 # Sentry Commit Messages
 
+Adapted from getsentry/skills; locally modified branch handling and commit guidance.
+Copyright 2025 Functional Software, Inc. dba Sentry. See LICENSE for Apache-2.0 terms.
+
 ## Before Committing
 
 ```bash

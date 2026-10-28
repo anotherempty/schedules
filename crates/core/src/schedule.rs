@@ -104,10 +104,8 @@ impl Schedule {
             Termination::Until(until) if until < placement.local_start() => {
                 return Err(Error::InvalidTermination);
             }
-            Termination::UntilInstant(until) => {
-                if until < placement.bounds(chrono_tz::UTC)?.0 {
-                    return Err(Error::InvalidTermination);
-                }
+            Termination::UntilInstant(until) if until < placement.bounds(chrono_tz::UTC)?.0 => {
+                return Err(Error::InvalidTermination);
             }
             _ => {}
         }

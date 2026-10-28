@@ -16,6 +16,10 @@ Your application owns item IDs, event content, persistence, and job execution.
 Schedules computes occurrences in memory; it does not execute tasks or read the
 system clock.
 
+Version 0.1: public APIs may change before 1.0. Project code is available under
+[MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+Vendored skills retain their [upstream licenses](THIRD-PARTY-NOTICES.md).
+
 | Crate | Purpose |
 | --- | --- |
 | `schedules-core` | Schedule definitions, recurrence, queries, and availability |
@@ -191,7 +195,7 @@ successor queries; traversal order can differ. Timezone rules come from
 
 ## Development
 
-Use a Rust toolchain supporting edition 2024. Run commands from the repository root.
+Requires Rust 1.91 or newer. Run commands from the repository root.
 
 ### Checks
 
