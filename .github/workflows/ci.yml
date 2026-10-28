@@ -2,21 +2,26 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     name: ${{ matrix.os }} / Rust ${{ matrix.rust }} / ${{ matrix.features.name }}
     runs-on: ${{ matrix.os }}
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable, '1.91.0']
         features:
           - name: default
@@ -33,6 +38,10 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         run: rustup toolchain install ${{ matrix.rust }} --profile minimal --component clippy
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.rust }}-${{ matrix.features.name }}
       - name: Test
         run: cargo +${{ matrix.rust }} test --workspace --locked ${{ matrix.features.args }}
       - name: Clippy
