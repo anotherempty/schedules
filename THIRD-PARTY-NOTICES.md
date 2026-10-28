@@ -11,7 +11,7 @@ their upstream licenses:
 2. `.agents/skills/commit`: adapted from
    [getsentry/skills](https://github.com/getsentry/skills), copyright
    2025 Functional Software, Inc. dba Sentry. Licensed under
-   [Apache-2.0](.agents/skills/commit/LICENSE). Local adaptations include branch
-   handling and repository commit instructions.
+   [Apache-2.0](.agents/skills/commit/LICENSE). Local adaptations include
+   repository commit instructions.
 
 Cargo dependencies retain their own licenses, declared in their package metadata.

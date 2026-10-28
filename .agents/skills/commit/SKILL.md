@@ -9,18 +9,10 @@ name: commit
 ---
 # Sentry Commit Messages
 
-Adapted from getsentry/skills; locally modified branch handling and commit guidance.
+Adapted from getsentry/skills; locally modified commit guidance.
 Copyright 2025 Functional Software, Inc. dba Sentry. See LICENSE for Apache-2.0 terms.
 
 ## Before Committing
-
-```bash
-git branch --show-current
-```
-
-If the branch is `main` or `master`, create a feature branch unless the user
-explicitly requested a direct commit. Re-check the branch and stop if it is
-still `main` or `master`.
 
 Commit one coherent, independently reviewable change at a time.
 
