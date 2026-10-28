@@ -2,6 +2,9 @@
 name = "calendar-views"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Timezone-aware day and week views for arbitrary application data"
 
 [dependencies]

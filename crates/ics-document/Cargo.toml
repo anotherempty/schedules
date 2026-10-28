@@ -2,6 +2,10 @@
 name = "ics-document"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standalone iCalendar document parsing and serialization with source locations"
 
 [dependencies]
 ical.workspace = true
