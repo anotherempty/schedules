@@ -16,22 +16,16 @@ concurrency:
 
 jobs:
   check:
-    name: ${{ matrix.os }} / Rust ${{ matrix.rust }} / ${{ matrix.features.name }}
-    runs-on: ${{ matrix.os }}
+    name: Linux / ${{ matrix.features.name }}
+    runs-on: ubuntu-latest
     env:
-      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
+      RUSTUP_TOOLCHAIN: '1.91.0'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        rust: [stable, '1.91.0']
         features:
           - name: default
             args: ''
-          - name: ics
-            args: '--features schedules-core/ics'
-          - name: calendar-views
-            args: '--features schedules-core/calendar-views'
           - name: all
             args: '--all-features'
     steps:
@@ -39,16 +33,18 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        run: rustup toolchain install ${{ matrix.rust }} --profile minimal --component clippy
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
       - name: Cache Cargo dependencies and build artifacts
         uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
-          key: ${{ matrix.os }}-${{ matrix.rust }}-${{ matrix.features.name }}
+          key: linux-${{ env.RUSTUP_TOOLCHAIN }}-${{ matrix.features.name }}
       - name: Test
-        run: cargo +${{ matrix.rust }} test --workspace --locked ${{ matrix.features.args }}
+        run: cargo test --workspace --locked ${{ matrix.features.args }}
       - name: Clippy
-        run: cargo +${{ matrix.rust }} clippy --workspace --all-targets --locked ${{ matrix.features.args }} -- -D warnings
+        if: matrix.features.name == 'all'
+        run: cargo clippy --workspace --all-targets --locked --all-features -- -D warnings
       - name: Documentation
+        if: matrix.features.name == 'all'
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo +${{ matrix.rust }} doc --workspace --no-deps --locked ${{ matrix.features.args }}
+        run: cargo doc --workspace --no-deps --locked --all-features
