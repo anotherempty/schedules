@@ -8,11 +8,12 @@ edition = "2024"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/anotherempty/schedules"
+publish = false
 
 [workspace.dependencies]
 ical = { version = "0.11", default-features = false, features = ["property"] }
-ics-document = { version = "0.1.0", path = "crates/ics-document" }
-calendar-views = { version = "0.1.0", path = "crates/calendar-views" }
+ics-document = { path = "crates/ics-document" }
+calendar-views = { path = "crates/calendar-views" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"
 thiserror = "2"

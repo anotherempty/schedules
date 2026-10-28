@@ -33,18 +33,18 @@ features, both disabled by default.
 
 ### Add the dependency
 
-Add the dependency:
+Add the Git dependency:
 
 ```toml
 [dependencies]
-schedules-core = "0.1"
+schedules-core = { git = "https://github.com/anotherempty/schedules" }
 ```
 
 Enable either or both integrations when needed:
 
 ```toml
 [dependencies]
-schedules-core = { version = "0.1", features = ["calendar-views", "ics"] }
+schedules-core = { git = "https://github.com/anotherempty/schedules", features = ["calendar-views", "ics"] }
 ```
 
 ### Query a recurring schedule
