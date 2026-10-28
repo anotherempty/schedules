@@ -33,18 +33,18 @@ features, both disabled by default.
 
 ### Add the dependency
 
-Use the repository as a Git dependency:
+Add the dependency:
 
 ```toml
 [dependencies]
-schedules-core = { git = "https://github.com/anotherempty/schedules.git" }
+schedules-core = "0.1"
 ```
 
 Enable either or both integrations when needed:
 
 ```toml
 [dependencies]
-schedules-core = { git = "https://github.com/anotherempty/schedules.git", features = ["calendar-views", "ics"] }
+schedules-core = { version = "0.1", features = ["calendar-views", "ics"] }
 ```
 
 ### Query a recurring schedule
@@ -212,6 +212,35 @@ Generate API documentation, including optional integrations:
 ```sh
 cargo doc --workspace --all-features --no-deps --open
 ```
+
+### Releases
+
+Install cargo-release and authenticate with crates.io:
+
+```sh
+cargo install cargo-release --version 1.1.7 --locked
+cargo login
+```
+
+Release from a clean, up-to-date `main` after CI passes. All three crates share
+one version and one `v<version>` tag. cargo-release updates dependency versions,
+publishes in dependency order, and pushes the release commit and tag to `origin`.
+
+Preview the initial release at the existing version:
+
+```sh
+cargo release --workspace
+```
+
+Execute the reviewed release:
+
+```sh
+cargo release --workspace --execute
+```
+
+For subsequent releases, use `cargo release patch --workspace` to preview and
+add `--execute` to publish. Use `minor` for breaking changes while on version 0.x.
+Commands without `--execute` are dry runs.
 
 ### Benchmarks
 
