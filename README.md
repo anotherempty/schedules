@@ -1,342 +1,290 @@
 # Schedules
 
-Rust libraries for calendar-aware placement, recurrence, and generic calendar views.
-No runtime or persistence required.
+## Description
 
-1. `crates/calendar-views` (`calendar-views`): standalone day/week grouping for
-   arbitrary owned or borrowed payloads paired with UTC points or intervals.
-2. `crates/core` (`schedules-core`): schedule definitions and occurrence queries;
-   optionally integrates `calendar-views` and `ics-document`.
-3. `crates/ics-document` (`ics-document`): independent ICS document parsing,
-   serialization, wire-data access, and source locations. Neither standalone
-   crate depends on core.
+Schedules is a Rust library for calendars, recurring appointments, and availability
+tools. Define when items happen, query occurrences, and find conflicts or free time
+without running a background service.
 
-`ScheduleStore<ItemId>` owns an in-memory map of item IDs to schedules. `insert` adds
-or replaces a complete schedule and returns the previous value. `get`, `get_mut`,
-`remove`, and `iter` provide access without cloning IDs or schedules. Application
-continues to own item payloads and persistence.
+1. Schedule one-off or recurring points, timed intervals, and all-day ranges.
+2. Exclude dates, cancel occurrences, or move individual events.
+3. Find conflicts, free slots, occupancy, and alternative appointment times.
+4. Group occurrences into local days and weeks.
+5. Parse and serialize ICS documents, with optional conversion to schedules.
 
-`ScheduleStore::occurrences` queries all items and returns `ScheduledOccurrence` values
-pairing borrowed item IDs with occurrences. Results sort by UTC start, item ID,
-then occurrence key. Identity across items is `(item ID, occurrence key)`.
-Work and result budgets apply across the entire query. Inspecting a schedule costs
-one additional work unit, including schedules without matching occurrences.
-Any expansion failure returns an error and discards partial results.
+Your application owns item IDs, event content, persistence, and job execution.
+Schedules computes occurrences in memory; it does not execute tasks or read the
+system clock.
 
-`ScheduleStore::next_after(&item_id, occurrence_key, all_day_zone, candidate_limit)`
-searches directly for one successor, without a date window or result limit.
-Ordering matches `occurrences`, including ties and repeated occurrences of the
-same item. Overrides determine actual placement. Missing or cancelled anchors
-return `Error::InvalidOccurrenceKey`; `None` means no successor exists across
-exhausted schedules. Candidate budget covers anchor lookup, schedule inspections,
-overrides, and recurrence expansion. Exhaustion returns `Error::CandidateLimit`,
-never an incomplete answer. IDs remain borrowed; no result list is collected.
-Unfiltered elapsed recurrence seeks by interval arithmetic, including count-limited
-series. Calendar recurrence seeks to the anchor date for forever/until rules.
-Calendar and weekday-filtered elapsed count limits use bounded historical expansion
-because skipped dates, timezone gaps, and excluded weekdays do not count as occurrences.
+| Crate | Purpose |
+| --- | --- |
+| `schedules-core` | Schedule definitions, recurrence, queries, and availability |
+| [`calendar-views`](crates/calendar-views/README.md) | Standalone day/week grouping for arbitrary payloads |
+| [`ics-document`](crates/ics-document/README.md) | Standalone ICS parsing, serialization, metadata, and source locations |
 
-1. `Placement`: timezone-aware point, timed interval, or date-only all-day range.
-2. `Schedule`: placement plus optional recurrence, date exclusions, and per-occurrence overrides.
-3. `CalendarRule`: Gregorian daily, weekly, monthly, or yearly frequency, positive
-   interval, optional weekday set, arbitrary selected local times, and termination.
-4. `Recurrence::elapsed`: fixed positive UTC cadence with optional local weekday filtering.
-5. `QueryWindow`: half-open UTC window, all-day viewing timezone, work budget,
-   and result budget.
-6. `Schedule::iter`: lazy fallible expansion. Overrides appear first, followed by
-   regular occurrences in recurrence order. First error terminates iteration.
-7. `Schedule::occurrences`: collect and sort overlapping occurrences by UTC start,
-   then original occurrence key. Errors discard partial results.
+Standalone crates do not depend on core. Core integrates them through optional
+features, both disabled by default.
 
-## Calendar views
+## Usage
 
-Core's `calendar-views` feature is disabled by default. Enable it to include the
-optional dependency, `calendar` re-export, calendar query methods, and
-`Error::CalendarView`:
+### Add the dependency
+
+Use the repository as a Git dependency:
 
 ```toml
-schedules-core = { version = "0.1", features = ["calendar-views"] }
+[dependencies]
+schedules-core = { git = "https://github.com/anotherempty/schedules.git" }
 ```
 
-The standalone `calendar-views` crate remains usable independently.
+Enable either or both integrations when needed:
 
-`ScheduleStore::calendar(window, candidate_limit, occurrence_limit)` creates a
-generic calendar snapshot from a `calendar::CalendarWindow`. Core re-exports the
-standalone crate as `schedules_core::calendar`. The filtered variant
-`calendar_filtered(window, candidate_limit, occurrence_limit, predicate)` accepts
-the same item-aware predicate as `occurrences_filtered`.
+```toml
+[dependencies]
+schedules-core = { git = "https://github.com/anotherempty/schedules.git", features = ["calendar-views", "ics"] }
+```
 
-Expansion and its budgets apply once across the complete window. The snapshot
-owns occurrence records borrowing item IDs; original keys and effective placements
-survive grouping. Stored exclusions and overrides apply before view construction.
-Spanning occurrences consume one result slot even if displayed on multiple days.
+### Query a recurring schedule
 
-`snapshot.days()` lazily yields local dates and overlapping entries, including empty
-days. `snapshot.weeks(weekday)` yields seven day positions per week; outside-window
-positions are `None`. Use `window.covering_weeks(weekday)` before querying for full
-weeks, so padded dates also have their occurrences fetched.
+This complete example creates a daily reminder and queries one week. The Unix
+epoch is a fixed example start; supply your application's timestamp in practice.
 
-Local midnight boundaries follow DST, choosing the earlier instant for ambiguity
-and returning typed errors for nonexistent midnight. Interior boundary errors
-occur during iteration; both iterators stop permanently after errors. Calendar
-view errors convert into `Error::CalendarView` when returned through core.
-See [calendar-views](crates/calendar-views/README.md) for standalone usage and costs.
+```rust
+use std::num::{NonZeroU32, NonZeroUsize};
 
-## Holidays and custom exclusions
+use schedules_core::{
+    CalendarRule, DateRange, DateTime, Duration, Error, Frequency, Placement,
+    QueryWindow, Recurrence, Schedule, Termination, Tz,
+};
 
-`Schedule::exclude_date(NaiveDate)` suppresses every occurrence starting on that
-local date. `include_date` removes the exclusion; `excluded_dates` borrows the
-stored set. Dates use the effective placement's timezone, or the start date for
-all-day placements, and apply after overrides. An overnight interval starting
-before an excluded date remains visible. Moving an occurrence off an excluded
-date makes it visible again; moving one onto the date hides it.
+const QUERY_SPAN: Duration = Duration::weeks(1);
+const CANDIDATE_BUDGET: usize = 1_000;
+const OCCURRENCE_BUDGET: usize = 100;
 
-Custom predicates may borrow application holiday calendars or business rules:
+fn main() -> Result<(), Error> {
+    let start = DateTime::UNIX_EPOCH;
+    let end = start.checked_add_signed(QUERY_SPAN).ok_or(Error::OutOfRange)?;
+    let placement = Placement::instant(start, Tz::UTC)?;
+    let rule = CalendarRule::new(
+        Frequency::Daily,
+        NonZeroU32::MIN,
+        Termination::Forever,
+    )?;
+    let schedule = Schedule::repeating(placement, Recurrence::calendar(rule))?;
+    let window = QueryWindow {
+        range: DateRange::new(start, end)?,
+        all_day_zone: Tz::UTC,
+        candidate_limit: NonZeroUsize::new(CANDIDATE_BUDGET).ok_or(Error::OutOfRange)?,
+        occurrence_limit: NonZeroUsize::new(OCCURRENCE_BUDGET).ok_or(Error::OutOfRange)?,
+    };
 
-1. `Schedule::iter_filtered(window, predicate)` and
-   `occurrences_filtered(window, predicate)` accept `FnMut(&Occurrence) -> bool`.
-2. `ScheduleStore::occurrences_filtered(window, predicate)` and
-   `analyze_filtered(window, predicate)` accept `FnMut(&ItemId, &Occurrence) -> bool`.
-3. `ScheduleStore::next_after_filtered(item_id, key, zone, budget, predicate)`
-   uses the same item-aware predicate and requires an accepted anchor.
+    let occurrences = schedule.occurrences(window)?;
+    // Seven daily points, sorted by UTC start. Pass these to your application.
+    for occurrence in occurrences {
+        let _placement = occurrence.placement();
+        let _identity = occurrence.key();
+    }
+    Ok(())
+}
+```
 
-Return `true` to retain an occurrence. Window queries invoke predicates only
-after stored exclusions and overlap checks, before result-limit accounting and
-sorting. Rejected occurrences consume work but no result slots. Date exclusions
-and predicates do not extend recurrence count, matching cancellation semantics;
-weekday selection inside the recurrence rule still counts only matching starts.
-Original membership remains valid for setting overrides on date-excluded entries.
+Use `Schedule::once(placement)` for a one-off event, `Placement::timed` for an
+interval with an elapsed duration, or `Placement::all_day` for a date range.
+`CalendarRule::with_weekdays` selects weekdays; `with_times` selects multiple local
+start times per matching date. The initial placement must match the rule.
 
-Custom predicates belong to each query and are not stored in `Schedule`. Pass
-the same predicate to analysis and successor queries for consistent results.
-Use deterministic predicates: traversal order differs between query methods.
-Callback execution time is outside the library's work budget. An endless series
-whose successors are all rejected ends with `CandidateLimit`, not `None`.
+### Manage items and find availability
 
-## Availability and conflicts
+`ScheduleStore<ItemId>` associates your IDs with schedules. Create one with
+`ScheduleStore::new()`, add a schedule with `store.insert(item_id, schedule)`,
+then query `store.occurrences(window)`. Results borrow item IDs; payloads remain
+in your application. Inserting an existing ID replaces its schedule and returns
+the previous value.
 
-`ScheduleStore::analyze(window)` expands occurrences once and returns a
-`ScheduleAnalysis` borrowing item identifiers. Query work and occurrence budgets
-retain their existing scope; any expansion error discards the analysis.
+| Task | API |
+| --- | --- |
+| Find the next occurrence across stored schedules after an existing occurrence | `store.next_after(&item_id, key, zone, candidate_limit)` |
+| Exclude or restore a local date | `schedule.exclude_date(date)` / `schedule.include_date(date)` |
+| Apply holiday calendars or business rules | `occurrences_filtered(window, predicate)` |
+| Analyze a window | `store.analyze(window)` |
+| Inspect free time | `analysis.gaps()` / `analysis.longest_gap()` |
+| Find gaps fitting a duration | `analysis.available_slots(minimum)` |
+| Check a proposed slot | `analysis.is_slot_available(range)` |
+| Inspect conflicts or occupancy | `analysis.overlaps()` / `analysis.density()` |
+| Suggest appointment times | `analysis.suggest_alternatives(preferred_start, duration)` |
 
-1. `gaps()` returns maximal free UTC ranges, including window edges.
-2. `available_slots(minimum)` yields free gaps fitting a positive elapsed duration.
-3. `longest_gap()` returns the longest gap, preferring the earliest on ties.
-4. `is_slot_available(range)` requires the entire slot to lie inside a free gap.
-5. `overlaps()` lazily yields each conflicting occurrence pair once, including
-   occurrences of the same item, with original identities and clipped intersection.
-6. `density()` reports occupied and free elapsed durations and occupancy ratio
-   (zero to one). Overlapping time counts once.
-7. `suggest_alternatives(preferred_start, duration)` returns one fitting appointment
-   per free gap, ranked by distance from the preferred UTC start, then earlier start.
-   Starts are clamped to each gap's valid start range; no time grid is imposed.
+Points consume no time and do not block availability. Timed and all-day intervals
+do. Touching intervals do not conflict. Suggestions stay inside the query window
+and keep existing events occupied, including an event being rescheduled.
 
-Analysis clips intervals to the window and resolves all-day boundaries in its
-viewing timezone. Touching intervals do not conflict. Points consume no time and
-do not block slots. Cancelled occurrences are absent; moved occurrences use their
-replacement placement. Suggestions keep existing events occupied, including an
-event being rescheduled, and cannot extend outside the analyzed window.
+### Calendar views and ICS
 
-Analysis stores O(n) data after expansion and sorting. Conflict pair enumeration
-can take O(n²) time; query budgets bound expansion, not pair enumeration. Use
-`overlaps().take(limit)` to limit returned pairs without allocating all conflicts.
-Suggestions use O(g log g) time and O(g) storage for g fitting gaps.
+With `calendar-views`, call
+`store.calendar(window, candidate_limit, occurrence_limit)` using a
+`schedules_core::calendar::CalendarWindow`. The snapshot exposes `days()` and
+`weeks(weekday)`. For complete boundary weeks, expand the window with
+`covering_weeks(weekday)` before querying. See the
+[calendar views guide](crates/calendar-views/README.md) for standalone usage.
 
-## Time semantics
+With `ics`, import `schedules_core::IcsScheduleExt` alongside `IcsDocument`:
 
-Calendar recurrence preserves local wall time and named IANA timezone. Elapsed
-recurrence preserves exact elapsed duration. Daily local recurrence therefore
-differs from repeating every 24 hours across daylight-saving transitions.
+1. `IcsDocument::deserialize(text)` parses an ICS document.
+2. `document.to_schedules(candidate_limit)` converts supported events into schedules.
+3. `IcsDocument::from_schedules(&events, dtstamp)` builds a document from schedules.
+4. `document.serialize()` produces ICS text.
 
-Timed intervals use exact elapsed durations. All-day ranges use calendar dates,
-with exclusive end dates; querying resolves boundaries in the supplied viewing
-timezone. Nonexistent all-day midnight boundaries return an error.
+Document parsing and schedule conversion are separate. Documents preserve metadata
+properties and nested alarms; schedule conversion ignores metadata. Serialization
+normalizes formatting rather than preserving original bytes. See the
+[ICS document guide](crates/ics-document/README.md) for standalone usage.
 
-Explicit nonexistent local placements are rejected. Calendar expansion skips
-nonexistent local times and invalid dates without consuming recurrence count.
-Ambiguous local times select earlier/later instant or return an error, according
-to `ResolutionPolicy`. Default selects earlier instant. Weeks begin Monday.
-Without weekday selection, monthly/yearly rules retain anchor day rather than
-clamping to month end.
+## How it works
 
-`CalendarRule::with_weekdays` and `Recurrence::with_weekdays` replace weekday
-selection, removing duplicates:
+### Definitions and queries
 
-1. Daily rules filter the original every-N-days cadence.
-2. Weekly rules expand selected weekdays within matching Monday-based weeks.
-3. Monthly rules expand every selected weekday within matching months.
-4. Yearly rules expand every selected weekday throughout matching years.
-5. Elapsed rules filter starts by local weekday in the placement's timezone,
-   preserving original UTC cadence across excluded days and DST changes.
+1. `Placement` defines when an item happens; `Schedule` adds recurrence and exceptions.
+   `QueryWindow` sets the UTC range, all-day timezone, and work/result limits.
+2. Queries expand schedules, apply overrides, then filter by exclusions and window.
+   Occurrence keys remain stable when events move; store identity pairs the key
+   with an item ID.
+3. `occurrences` returns sorted results: UTC start, item ID for store queries,
+   then occurrence key. `iter` yields lazily, overrides first, and stops on error.
 
-The initial placement must match the selection; earlier dates in its month/year
-are not emitted. Empty selection restores default behavior: anchor weekday for
-weekly, anchor day for monthly, anchor month/day for yearly, no weekday filter
-for daily or elapsed. Excluded weekdays do not consume occurrence count, but
-each scanned date or elapsed cadence step consumes query work budget. Filtered
-elapsed rules currently scan skipped cadence steps; subsecond rules spanning
-excluded days can require large budgets.
+### Time and recurrence
 
-`CalendarRule::with_weekdays` now returns `Self`; remove trailing `?` or `unwrap()`
-from existing calls. The obsolete `Error::InvalidWeekdayFilter` variant is removed.
+1. **Calendar recurrence** preserves local wall time in a named IANA timezone.
+   Daily, weekly, monthly, and yearly rules support positive intervals, weekdays,
+   multiple local times, and count or inclusive local cutoffs.
+2. **Elapsed recurrence** preserves an exact UTC cadence, with optional local
+   weekday filtering and count or inclusive UTC cutoffs. Repeating every 24 hours
+   can differ from repeating daily across daylight-saving changes.
+3. **Ranges** include their start and exclude their end. Timed durations measure
+   elapsed time. All-day dates resolve in the query's viewing timezone.
+4. **DST and invalid dates:** explicit nonexistent local placements fail;
+   recurrence skips nonexistent times and invalid dates without consuming count.
+   Ambiguous times use `ResolutionPolicy`, defaulting to the earlier instant.
+   Nonexistent all-day midnight boundaries return errors.
+5. **Calendar selection:** weeks begin Monday. Without weekday selection, monthly
+   and yearly rules keep the anchor day and skip invalid dates instead of clamping.
+   With weekday selection, they expand every matching weekday in matching periods.
+6. **Exceptions:** cancellations, exclusions, and predicate rejection do not extend
+   recurrence counts. Date exclusions use the effective occurrence's local start
+   date, so an overnight event starting the previous day remains visible.
 
-`CalendarRule::with_times` selects any number of local times on each matching date.
-`TimeSet` stores times uniquely in sorted order, retaining subsecond precision.
-Empty selection inherits initial placement's time. For example, weekly recurrence
-on Monday through Thursday with selected times 09:00 and 17:00 produces eight
-occurrences per week. Three or more selected times work the same way.
+Use deterministic predicates consistently across occurrence, analysis, and
+successor queries; traversal order can differ. Timezone rules come from
+`chrono-tz`, so dependency updates deliver timezone database changes.
 
-Initial timed placement must belong to the selected time set. Earlier selected
-times on its date are excluded; later matching dates include all selected times.
-Each date/time pair has its own occurrence key and consumes recurrence count only
-when successfully resolved. DST gaps skip only the affected time; ambiguity policy
-applies independently to each time. Explicit time selection is rejected for all-day
-schedules. Elapsed recurrence remains independent of calendar time selection.
+### Limits and errors
 
-Termination supports forever, count, inclusive local cutoff for calendar rules,
-or inclusive UTC cutoff for elapsed rules. Initial placement must match rule and
-not exceed cutoff. Count includes original, cancelled, date-excluded, and
-predicate-rejected occurrences; exceptions do not regenerate the series.
+1. **Query limits:** positive work and result budgets apply across the whole query.
+   Exhaustion returns a typed error, not truncated success. Collecting queries
+   discard partial results; lazy iteration can fail after yielding items.
+   `next_after` returns `None` when exhausted and errors for invalid anchors.
+2. **Cost:** long histories and filtered recurrences can require large budgets.
+   Budgets exclude predicate runtime and conflict enumeration, which can be quadratic.
+3. **Recurrence scope:** core does not implement full RFC 5545, floating times,
+   calendar-duration event lengths, or Google adapters.
+4. **ICS:** conversion supports a subset of UTC and date-only schedules; unsupported
+   timing returns errors. Parsing accepts `VCALENDAR`, `VEVENT`, and nested `VALARM`,
+   but not `VTIMEZONE`. Bound input size and event count separately; conversion
+   budgets apply per exception. See the [ICS guide](crates/ics-document/README.md).
 
-Overrides retain original `OccurrenceKey`, scoped to their schedule. Replacement
-can enter a query window even when original occurrence lies outside it. Membership
-is validated with an explicit candidate budget before storing an override.
+## Development
 
-## Scope and limits
+Use a Rust toolchain supporting edition 2024. Run commands from the repository root.
 
-Application owns item identity and payload. Library computes placements without
-executing jobs or reading system clock. Chrono and chrono-tz supply temporal types
-and bundled timezone rules; dependency updates deliver timezone database changes.
-
-Expansion scans from anchor to preserve count semantics. Calendar candidates are
-scanned by date, then by selected time on matching dates. Each attempted time and
-each skipped nonmatching date consumes work. Both overrides inspected and candidates scanned consume work
-budget. Exhaustion returns a typed error rather than successful truncation.
-Lazy consumers must handle errors encountered after earlier successful items.
-
-Current API implements a recurrence subset, not full RFC 5545. Arbitrary month/day
-filters, additional recurrence dates, floating local times, calendar-duration
-event lengths, and Google adapters are not implemented.
-
-## Optional ICS interoperability
-
-Use `ics-document` directly for scheduling-agnostic document operations.
-Enable `schedules-core`'s `ics` feature for the optional integration: re-exported
-`IcsDocument`, `IcsEvent`, `IcsError`, and the `IcsScheduleExt` conversion trait.
-Import `IcsScheduleExt` to use `to_schedules` and `from_schedules`.
-Disabled by default; `ics-document` and its parser are absent from core's default
-dependency graph. The standalone crate depends only on `ical` and `thiserror`.
-`IcsDocument::deserialize(text)` parses one VCALENDAR into structured data.
-`document.serialize()` emits a complete `.ics` document. Neither operation
-requires schedule-compatible timing. `document.to_schedules(candidate_limit)`
-performs that conversion explicitly; `IcsDocument::from_schedules(&events, dtstamp)`
-builds a document from schedules.
-UID is caller-supplied textual identity; no event metadata model is introduced.
-Core conversion failures expose typed `IcsInvalid`, `IcsUnsupported`, and
-`IcsField` context. Wire parsing failures use `ics_document::Error` and `Invalid`;
-the adapter preserves them in `IcsError::Wire` when needed.
-Missing fields, duplicates, malformed values, and unsupported constructs are
-distinct. Duplicate UIDs, orphan exceptions, and duplicate occurrence exceptions
-have separate errors. Numeric, date, syntax, and schedule errors retain their
-underlying error sources where available.
-Import errors expose `location()` with one-based physical start/end lines,
-including folded continuations. `kind()` borrows the underlying typed failure;
-`source()` preserves the location layer and original cause chain. Missing fields
-point to their enclosing component; incomplete documents point to the final
-physical line. Standalone conversions and export failures have no source location.
-Documents retain metadata properties, parameters, and nested alarms without an
-application-specific metadata model. Serialization normalizes property order,
-parameter quoting, folding, and line endings; it is not byte-preserving.
-Schedule conversion ignores metadata; constructing a document from schedules
-does not invent metadata. Source locations remain tied to the original input.
-
-Supported [RFC 5545](https://www.rfc-editor.org/rfc/rfc5545) subset:
-
-1. UTC `DTSTART`/`DTEND` and date-only all-day events, with exclusive end dates.
-   An omitted all-day end means one day; an omitted timed end means a point.
-2. Daily, weekly, monthly, and yearly recurrence, `INTERVAL`, nonordinal `BYDAY`,
-   `COUNT`, and inclusive `UNTIL`. Week starts Monday.
-3. `EXDATE` cancellations and detached `RECURRENCE-ID` replacements/cancellations,
-   including exceptions appearing before their master. EXDATE takes precedence.
-4. Escaped textual UIDs, CRLF output, and UTF-8-safe folding at 75 octets.
-
-Unsupported timing returns a conversion error instead of being approximated: floating times,
-TZID input, zoned recurring export, elapsed recurrence, explicit selected
-times, other RRULE parts, RDATE, DURATION, date-wide exclusions, RANGE exceptions,
-and METHOD scheduling messages. Zoned one-off export preserves its UTC instant;
-its original timezone label is not retained. Subsecond/leap-second precision and
-years outside four digits are rejected. Duplicate masters and orphan exceptions
-are conversion errors. Schedule results are ordered by UID. Document parsing
-supports VCALENDAR, VEVENT, and nested VALARM; other components, including
-VTIMEZONE, are rejected during deserialization.
-
-Exception validation uses the caller's candidate budget per exception. Callers
-must bound input size and event count separately. Export takes an explicit
-DTSTAMP and never reads the system clock.
-
-## Validation
+### Checks
 
 ```sh
 cargo test --workspace
 cargo test --workspace --all-features
-cargo fmt --all -- --check
+cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-features --all-targets -- -D warnings
 ```
 
-## Benchmark
-
-ICS deserialization benchmarks belong to the standalone crate:
+Generate API documentation, including optional integrations:
 
 ```sh
-cargo bench -p ics-document --bench ics_deserialize
+cargo doc --workspace --all-features --no-deps --open
 ```
 
-`ics_deserialize` measures documents with 10, 100, and 1,000 events in two forms:
-basic UTC events, and events with recurrence properties, UTF-8 folded descriptions,
-quoted attendee parameters, and nested alarms. Throughput reports input bytes.
-Fixture construction, event-count checks, metadata checks, and serialization
-stability checks run outside timing. Measurements include deserialization,
-source-location tracking, allocation, and document destruction; schedule conversion
-and serialization are excluded. Criterion stores results under `target/criterion`.
+### Benchmarks
 
 ```sh
 cargo bench -p schedules-core --bench schedule_store
+cargo bench -p ics-document --bench ics_deserialize
 ```
 
-Criterion measures complete sorted schedule store queries with 10, 100, and 1,000 items.
-Each item repeats on four weekdays at three local times across London, New York,
-and Nairobi timezones. Two-week query crosses London's spring DST transition and
-returns 24 occurrences per item. Recent and year-old anchors expose expansion's
-history-scanning cost. Setup and successful result-count verification occur outside
-timed iterations; query expansion, timezone resolution, allocation, sorting, and
-result destruction are measured. Criterion stores reports under `target/criterion`.
+Benchmarks focus on how costs grow with more items, older recurring schedules,
+and richer calendar documents:
 
-`schedule_store_next_after` measures one-successor searches using the same item counts,
-timezones, and recent/year-old schedules. Anchor occurrence stays in March 2026,
-so year-old cases verify that seeking avoids historical expansion. Setup validates the successor
-against sorted query results outside timed iterations. Throughput counts one
-successor per query. Run only this group with:
+1. **Occurrence queries:** measure expansion and sorting across store sizes.
+   Compare recent and year-old schedules to expose the cost of scanning history.
+2. **Successor searches:** measure finding one next occurrence without collecting
+   a whole window. Older schedules help assess whether seeking avoids historical
+   expansion.
+3. **Availability analysis:** measure building an analysis from recurring events.
+   Separate benchmarks measure enumerating all conflict pairs in dense calendars
+   and ranking alternative appointments from an already-built analysis.
+4. **ICS parsing:** compare basic and metadata-heavy documents as event counts
+   grow. Measure document parsing and allocation, excluding schedule conversion
+   and serialization.
 
-```sh
-cargo bench -p schedules-core --bench schedule_store -- schedule_store_next_after
-```
+Fixture setup and correctness checks run outside timing.
 
-Analysis benchmarks use one-hour timed events with the same item counts,
-recurrence rules, timezones, and DST-crossing window:
+#### Benchmarking new functionality
 
-1. `schedule_store_analysis` measures expansion, sorting, analysis construction, and
-   result destruction for recent and year-old anchors.
-2. `schedule_store_analysis_overlaps` consumes every conflict pair from a precomputed
-   analysis; throughput counts pairs. Dense same-zone events expose quadratic
-   output growth without allocating a conflict list.
-3. `schedule_store_analysis_alternatives` generates and drops ranked one-hour
-   appointments from a precomputed analysis. Gap count remains fixed as item
-   count grows, isolating suggestion cost from occurrence expansion.
+When adding functionality, benchmark the user-visible operation and the factors
+that make its cost grow:
 
-Setup validates occurrence counts, 64 occupied hours, 49 free gaps, independently
-calculated conflict counts, and suggested appointment validity outside timing.
-Run all analysis groups with:
+1. **Representative workloads:** cover typical use and expensive supported cases.
+   For scheduling features, consider long recurrence histories, dense overlaps,
+   exclusions, overrides, and timezone transitions where relevant.
+2. **Scaling:** vary the relevant input size, such as schedules, occurrences,
+   exceptions, free gaps, or document bytes. Start with 10, 100, and 1,000 items
+   when meaningful; keep other factors fixed to isolate the cost being measured.
+3. **Complete operations:** measure what callers pay, including expansion,
+   allocation, sorting, and result destruction where applicable. If a feature
+   reuses precomputed data, measure preparation and reuse separately.
+4. **Correctness and limits:** validate expected results outside timing. For
+   bounded operations, include workloads near their budgets; benchmark rejection
+   paths separately when handling oversized or invalid input is a feature concern.
+5. **Comparisons:** run existing benchmarks before and after changes under the
+   same conditions. Record input sizes, units, CPU, thread count, toolchain, and
+   build profile alongside results. Compare against measurement variability
+   before claiming an improvement or regression.
 
-```sh
-cargo bench -p schedules-core --bench schedule_store -- schedule_store_analysis
-```
+Keep fixture construction outside timing unless construction itself is the
+operation being measured. Add benchmarks for meaningful costs rather than every
+method, and update the results below when benchmarked behavior changes.
+
+#### Measured results
+
+Benchmarks used one workload thread (reported clock: 3.8 GHz).
+Times are per complete operation, not per item.
+
+| Core operation | 10 schedules | 100 schedules | 1,000 schedules |
+| --- | ---: | ---: | ---: |
+| Occurrence query, recent anchors | 75.14 µs | 830.69 µs | 9.19 ms |
+| Occurrence query, year-old anchors | 1.48 ms | 14.89 ms | 149.45 ms |
+| Next occurrence, recent anchors | 3.50 µs | 29.37 µs | 284.29 µs |
+| Next occurrence, year-old anchors | 3.08 µs | 28.46 µs | 286.08 µs |
+| Availability analysis, recent anchors | 110.07 µs | 1.13 ms | 12.80 ms |
+| Availability analysis, year-old anchors | 1.82 ms | 17.63 ms | 180.46 ms |
+| Enumerate all conflict pairs | 10.62 µs | 1.20 ms | 122.34 ms |
+| Rank alternative appointments | 2.34 µs | 2.38 µs | 2.43 µs |
+
+Core fixtures use recurring schedules across London, New York, and Nairobi,
+with 24 occurrences per schedule in a two-week window crossing London's DST
+change. Analysis uses one-hour events. Conflict enumeration and alternative
+ranking use a prebuilt analysis; alternative ranking has 49 free gaps at every
+store size, explaining its nearly constant cost.
+
+| ICS document parsing | 10 events | 100 events | 1,000 events |
+| --- | ---: | ---: | ---: |
+| Basic UTC events | 22.67 µs | 259.76 µs | 2.35 ms |
+| Events with metadata and alarms | 66.64 µs | 710.09 µs | 7.34 ms |
+
+ICS timings include
+parsing, source-location tracking, allocation, and document destruction.
