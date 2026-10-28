@@ -281,9 +281,7 @@ Times are per complete operation, not per item.
 
 Core fixtures use recurring schedules across London, New York, and Nairobi,
 with 24 occurrences per schedule in a two-week window crossing London's DST
-change. Analysis uses one-hour events. Conflict enumeration and alternative
-ranking use a prebuilt analysis; alternative ranking has 49 free gaps at every
-store size, explaining its nearly constant cost.
+change. Analysis uses one-hour events.
 
 | ICS document parsing | 10 events | 100 events | 1,000 events |
 | --- | ---: | ---: | ---: |
